@@ -5,16 +5,17 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { styleText, stripVTControlCharacters } from 'node:util';
 
-export const COMMANDS = ['/check', '/right', '/wrong', '/status', '/help', '/exit'];
+export const COMMANDS = ['/check', '/right', '/wrong', '/quote', '/status', '/help', '/exit'];
 /** How a user gets back to the window: the one wording every screen and message uses. */
 export const OPEN = 'open the window (npm run jev, or superjev with no words)';
 
 export type Turn =
-  | { kind: 'empty' | 'help' | 'version' | 'exit' | 'status' | 'wrong' }
+  | { kind: 'empty' | 'help' | 'version' | 'exit' | 'status' | 'wrong' | 'quote' }
   | { kind: 'right'; rank: number }
   | { kind: 'ask' | 'check' | 'say'; text: string }
   | { kind: 'connect'; path: string; dir: boolean; pointer?: string /* the engine's own name for a set to refresh */ };
-export type Session = { principal: string; skillDir: string; connected: Set<string>; last?: string /* the last question asked in this session */ };
+export type Session = { principal: string; skillDir: string; connected: Set<string>; last?: string /* the last question asked in this session */;
+  quote?: boolean /* /quote: each ask also brings back the line that answers, quoted from the notes (no AI) */ };
 export type Look = { width: number; color: boolean; home: string; keyEnv?: string; keySource?: 'env' | 'file' | 'none'; vendor?: string;
   door?: boolean /* the one-shot door: no window is open yet */ };
 // noNext: no Next line: the turn was a status (a next step would only point back at it), or the window is about to do the fix itself.
@@ -88,6 +89,7 @@ export function readLine(line: string, home: string = process.env.HOME ?? ''): T
   if (cmd === '/exit') return { kind: 'exit' };
   if (cmd === '/status') return { kind: 'status' };
   if (cmd === '/wrong') return { kind: 'wrong' };
+  if (cmd === '/quote') return { kind: 'quote' };
   if (cmd === '/right') {
     const n = rest === '' ? 1 : /^\d$/.test(rest) ? Number(rest) : 0;
     return n >= 1 && n <= 5 ? { kind: 'right', rank: n } : { kind: 'say', text: 'Usage: /right [n]   n is the note number, 1 to 5' };
@@ -110,7 +112,7 @@ const literalName = (n: string) => n.replace(/[[\]*?]/g, (c) => `[${c}]`);
 /** The helper's argv, script path first. Never run through a shell. */
 export function helperCall(turn: Turn, s: Session): string[] {
   const ask = [join(s.skillDir, 'ask.py'), '--principal', s.principal, '--json'];
-  if (turn.kind === 'ask') return [...ask, '--', turn.text];
+  if (turn.kind === 'ask') return [...ask, ...(s.quote ? ['--quote'] : []), '--', turn.text];
   if (turn.kind === 'check') return [...ask, '--claim', turn.text];
   if (turn.kind === 'status') return [...ask, '--status'];
   if (turn.kind === 'right') return [...ask, '--approve', s.last ?? '', '--rank', String(turn.rank)];
@@ -175,6 +177,7 @@ export const HELP = [
   '  /check <statement>  check it against your notes',
   '  /right [n]          the last answer was right: save it now',
   '  /wrong              the last answer was wrong: forget it',
+  '  /quote              quoted answers on or off, no AI',
   '  /status             show what is connected',
   '  /help or ?          show this list',
   '  /exit               leave (Ctrl+D works too)'].join('\n');
@@ -337,9 +340,12 @@ export function render(shown: Shown, look: Look): string {
     head(d.saved ? ['Saved answer', ...after('notes unchanged')] : headline(`Found ${found}`), d.saved ? 'green' : '');
     if (d.saved?.by === 'you' && d.saved.answer) out.push(...saved(String(d.saved.answer)));
     for (const s of skills) body([s.name, gap(path(s.path)), ...(s.guess ? [tag('guess')] : [])]);
+    // /quote: the line the engine picked from these notes with no AI, word for word, or its honest no-line reply.
+    if (d.quote?.text) { body('Answer:'); quote(d.quote.text); out.push(...lay(place(d.quote), 'dim', '    ', '    ')); }
+    else if (d.quote?.why) body(d.quote.why);
     files.forEach((f, i) => {
       body([...place(f, `${i + 1} `), ...(f.tier === 'possible' ? [tag('possible')] : f.tier === 'unchecked' ? [tag('not checked')] : [])]);
-      if (i === 0 && f.text) quote(f.text);
+      if (i === 0 && f.text && !d.quote) quote(f.text);
     });
     if (d.leans_none) body('Jev leans toward none of these; the answer may not be here.');
     if (d.saved_now) body('Saved for next time.');

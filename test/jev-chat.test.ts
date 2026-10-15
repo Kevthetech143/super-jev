@@ -191,6 +191,22 @@ test('S1 found: files in rank order with ~ and :line, possible on #3, quote unde
   assert.match(s, /^• Found 3 notes · 1\.4s$/m);
 });
 
+test('S1b /quote: the answer line quoted with its path:line, in place of the quote under #1; the no-line reply as the engine wrote it', () => {
+  const quoted = 'The canary holds for 30 minutes before promotion.';
+  const s = R('ask', FOUND({ quote: { text: quoted, path: HB, line: 41 } }));
+  assert.ok(s.indexOf('Answer:') < s.indexOf(`"${quoted}"`) && flat(s).includes(`"${quoted}"`), s);
+  assert.ok(s.includes('~/Team Notes/eng/handbook.md:41'), s);
+  assert.ok(!flat(s).includes(HANDBOOK_QUOTE), 'one quote only: the answer line');
+  const none = 'I found related files but no line that answers this.';
+  const n = R('ask', FOUND({ quote: { why: none, top: HB } }));
+  assert.ok(flat(n).includes(none) && !n.includes('Answer:'), n);
+  assert.ok(!R('ask', FOUND()).includes('Answer:'), 'off by default: no quote field, no Answer line');
+  const ask = join(SKILL, 'ask.py');
+  assert.deepEqual(cfg.helperCall({ kind: 'ask', text: 'q' }, { ...session, quote: true }), [ask, '--principal', 'me', '--json', '--quote', '--', 'q']);
+  assert.deepEqual(cfg.helperCall({ kind: 'ask', text: 'q' }, session), [ask, '--principal', 'me', '--json', '--', 'q']);
+  assert.equal(cfg.readLine('/quote').kind, 'quote');
+});
+
 test('S2 saved answer by auto: says Saved answer and lists the files', () => {
   const s = R('ask', FOUND({ saved: { by: 'auto', date: '2026-09-12' }, files: [{ path: HB, tier: 'confirmed' }, { path: RC, tier: 'confirmed' }] }));
   assert.match(s, /^• Saved answer/m);
@@ -275,16 +291,16 @@ test('S14b two sets with the same folder are told apart by their name; a folder 
 
 test('S15 help lists exactly the commands that exist, and ? is the same help', () => {
   const s = clean(cfg.render({ kind: 'help', data: {} }, OPTS));
-  assert.deepEqual([...new Set(s.match(/\/[a-z]+/g))].sort(), ['/check', '/exit', '/help', '/right', '/status', '/wrong']);
+  assert.deepEqual([...new Set(s.match(/\/[a-z]+/g))].sort(), ['/check', '/exit', '/help', '/quote', '/right', '/status', '/wrong']);
   assert.match(s, /\?/);
   assert.equal(cfg.readLine('?').kind, 'help');
   assert.equal(cfg.readLine('/help').kind, 'help');
-  for (const c of ['/check x', '/status', '/help', '/exit', '/wrong', '/right', '/right 2']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
+  for (const c of ['/check x', '/status', '/help', '/exit', '/wrong', '/quote', '/right', '/right 2']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
 });
 
 test('S15b help rows line up: every description starts in the same column, and a row fits 60 columns', () => {
   const rows = cfg.HELP.split('\n').slice(1);
-  assert.equal(rows.length, 7, 'the drag row and the six commands');
+  assert.equal(rows.length, 8, 'the drag row and the seven commands');
   const col = rows.map((l) => { const m = /^( {2}.+?\S)( {2,})(\S.*)$/.exec(l); assert.ok(m, `no description column in ${JSON.stringify(l)}`); return m![1].length + m![2].length; });
   assert.equal(new Set(col).size, 1, `descriptions start in columns ${col.join(', ')}:\n${cfg.HELP}`);
   for (const l of rows) assert.ok(l.length <= 60, l);

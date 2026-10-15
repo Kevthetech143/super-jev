@@ -23,6 +23,9 @@ const TITLE = `Super Jev ${VERSION}`;
 const NO_PYTHON = 'Super Jev needs Python 3.10 or newer, and python3 was not found. Install it (python.org/downloads), then run npm run jev again.';
 const ESC = Symbol('esc');
 const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+const QUOTE_ON = 'Quoted answers on: each answer also shows the line from your notes that answers it, picked without AI. Check it in the note.';
+const QUOTE_OFF = 'Quoted answers off.';
+const QUOTE_DOOR = 'For one question with a quoted answer: SUPERJEV_QUOTE=1 superjev "your question"';
 
 type IO = { argv: string[]; env: NodeJS.ProcessEnv; stdin: any; stdout: any; stderr: any };
 type Done = { code: number; out: string; err: string; stopped: boolean };
@@ -41,7 +44,7 @@ export async function run(io: IO): Promise<number> {
   let fileKey = readKeyFile();
   const keySource = () => (keyEnv && env[keyEnv] ? 'env' : fileKey ? 'file' : 'none') as 'env' | 'file' | 'none';
   const needsKey = () => profile.keyRequired && keySource() === 'none';
-  const session: Session = { principal: env.SUPERJEV_PRINCIPAL || 'me', skillDir: SKILL, connected: new Set() };
+  const session: Session = { principal: env.SUPERJEV_PRINCIPAL || 'me', skillDir: SKILL, connected: new Set(), quote: env.SUPERJEV_QUOTE === '1' };
   const look = () => ({ width: Math.min(stdout.columns || 80, 80), color: !!stdout.isTTY && !env.NO_COLOR, home, keyEnv, keySource: keySource(), vendor,
     door: argv.length > 0 });
   const out = (text: string) => stdout.write(text + '\n');
@@ -307,6 +310,7 @@ export async function run(io: IO): Promise<number> {
         else if (t.kind === 'ask' || t.kind === 'check') { afterCheck = t.kind === 'check'; if (t.kind === 'ask') session.last = t.text; text = await answer(t); }
         else if (t.kind === 'wrong') text = await wrong();
         else if (t.kind === 'right') text = await right(t);
+        else if (t.kind === 'quote') { session.quote = !session.quote; text = session.quote ? QUOTE_ON : QUOTE_OFF; }
         else if (t.kind !== 'empty') text = (await helper(t)).text;
         if (text) stdout.write(text + '\n\n');
       }
@@ -322,6 +326,7 @@ export async function run(io: IO): Promise<number> {
     if (t.kind === 'exit') return 0;
     if (t.kind === 'say') { stderr.write(t.text + '\n'); return 2; }
     if (t.kind === 'wrong' || t.kind === 'right') { stderr.write(NO_QUESTION + '\n'); return 2; } // a one-shot line has no earlier question
+    if (t.kind === 'quote') { stderr.write(QUOTE_DOOR + '\n'); return 2; }
     if (t.kind === 'empty') { stderr.write('Usage: superjev "your question"\n'); return 2; }
     if (askedKey(t)) { stderr.write(noKey + '\n'); return 4; }
     if (t.kind === 'connect') {
