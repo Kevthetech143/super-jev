@@ -20,8 +20,10 @@ The fixture, fixtures/context/small_payloads.json, was generated on origin/main 
 Never regenerate it to make a failure go away: small must read what main read. The notes are built from fixed
 arithmetic, never random, so they are the same bytes on every machine.
 
-The rest fail on the base, which has one fixed budget. They set the preset through the module's own state, _CONTEXT,
-which is what an ask sets once from the flag, the environment or the saved choice (a later item).
+The other tests are new and, but for one, fail on the base, which has one fixed budget. They set the preset through the
+module's own state, _CONTEXT, which is what an ask sets once from the flag, the environment or the saved choice (a later
+item). The exception, test_ask_loads_beside_an_older_build_whose_profile_has_no_read_chars, guards a failure of the change
+itself (found by the scorecard) and so passes on the base.
 
 No network, no key, no Jev call: a fake navigation stands in for the content check, and the one test that runs the real
 navigation-cli does it against an offline fetch hook.
@@ -34,7 +36,6 @@ import importlib.util
 import json
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
