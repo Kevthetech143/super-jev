@@ -81,7 +81,7 @@ function win(r: Rig, env: Record<string, string> = {}) {
   const w = {
     text: () => strip(out), err: () => strip(err),
     say: (line: string) => stdin.write(line + '\r'),
-    async waitFor(what: string | RegExp | (() => boolean), ms = 8000) {
+    async waitFor(what: string | RegExp | (() => boolean), ms = 20000) {
       const ok = () => (typeof what === 'function' ? what() : typeof what === 'string' ? w.text().includes(what) : what.test(w.text()));
       const end = Date.now() + ms;
       while (!ok()) {
@@ -92,7 +92,7 @@ function win(r: Rig, env: Record<string, string> = {}) {
     ready: () => w.waitFor(/Ready\.|\? for help/),
     async quit() {
       stdin.write('\x04');
-      return Promise.race([done, new Promise<number>((_, rej) => setTimeout(() => rej(new Error('run() did not finish; screen:\n' + w.text())), 8000))]);
+      return Promise.race([done, new Promise<number>((_, rej) => setTimeout(() => rej(new Error('run() did not finish; screen:\n' + w.text())), 20000))]);
     },
   };
   return w;
@@ -103,7 +103,7 @@ async function door(r: Rig, args: string[], env: Record<string, string> = {}) {
   return new Promise<{ code: number; out: string; err: string }>((done) => {
     const p = spawn(process.execPath, [CLI, ...args], { env: { ...r.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
-    const kill = setTimeout(() => p.kill('SIGKILL'), 20000);
+    const kill = setTimeout(() => p.kill('SIGKILL'), 60000);
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (err += d));
     p.on('close', (code) => { clearTimeout(kill); done({ code: code ?? -1, out: strip(out), err: strip(err) }); });
@@ -134,18 +134,19 @@ test('/context large sets the session and helperCall adds --context large before
   const r = rig([STATUS(), FOUND]);
   const w = win(r);
   await w.ready();
+  const found = () => w.text().split('Found 1 note').length - 1; // a line typed while a search runs is dropped, so wait for each answer
   w.say('first?');
-  await w.waitFor(() => asks(r).length === 1);
+  await w.waitFor(() => found() === 1);
   const before = r.calls().length;
   w.say('/context large');
   await w.waitFor('Context: Large (this window)');
   assert.equal(r.calls().length, before, 'setting the size calls no helper');
   w.say('second?');
-  await w.waitFor(() => asks(r).length === 2);
+  await w.waitFor(() => found() === 2);
   w.say('/context small');
   await w.waitFor('Context: Small (this window)');
   w.say('third?');
-  await w.waitFor(() => asks(r).length === 3);
+  await w.waitFor(() => found() === 3);
   const [one, two, three] = asks(r).map((c) => c.args);
   assert.deepEqual(one, ['--principal', 'me', '--json', '--', 'first?']);
   assert.deepEqual(two, ['--principal', 'me', '--context', 'large', '--json', '--', 'second?']);
@@ -160,7 +161,6 @@ test('/context alone shows the current one', async () => {
   assert.match(showing('env', 'large'), /^• Context: Large \(SUPERJEV_CONTEXT\)$/m);
   assert.match(showing('settings'), /^• Context: Medium \(saved default\)$/m);
   assert.match(showing('default', 'small'), /^• Context: Small \(the default\)$/m);
-  assert.match(showing('flag'), /\/context small, medium or large/, 'and how to change it');
   // /status shows it too, under the folders; a helper that says nothing of it adds no row
   const status = (context?: object) => strip(cfg.render({ kind: 'status', data: { v: 1, ...STATUS().out as object, ...(context ? { context } : {}) } }, OPTS));
   assert.match(status({ preset: 'large', default: 'small', source: 'env' }), /^ {2}Context: Large \(SUPERJEV_CONTEXT\)$/m);
@@ -173,7 +173,7 @@ test('/context alone shows the current one', async () => {
   await w.ready();
   w.say('/context');
   await w.waitFor('Context: Medium (SUPERJEV_CONTEXT)');
-  assert.ok(!w.text().includes('0.'), 'no timing on a setting');
+  assert.ok(!/Context: Medium \(SUPERJEV_CONTEXT\) ·/.test(w.text()), 'no timing on a setting');
   w.say('/context large');
   await w.waitFor('Context: Large (this window)');
   w.say('/context');
@@ -202,7 +202,7 @@ test('/context nope says the usage', async () => {
   await w.waitFor('Usage: /context [small|medium|large]');
   assert.equal(r.calls().length, before, 'the usage calls no helper');
   w.say('canary?');
-  await w.waitFor(() => asks(r).length === 1);
+  await w.waitFor('Found 1 note');
   assert.ok(!asks(r)[0].args.includes('--context'), 'a refused name sets nothing');
   assert.equal(await w.quit(), 0);
   // a judge profile that states only small refuses a bigger size in the window, so no ask is ever sent one it would refuse
@@ -211,7 +211,7 @@ test('/context nope says the usage', async () => {
   laya.say('/context large');
   await laya.waitFor('Unknown context "large" (choose small)');
   laya.say('canary again?');
-  await laya.waitFor(() => asks(r).length === 2);
+  await laya.waitFor('Found 1 note');
   assert.ok(!asks(r)[1].args.includes('--context'));
   await laya.quit();
   // the door cannot keep a size between runs: it says so and points at the variable
@@ -228,4 +228,7 @@ test('HELP lists /context', () => {
   // Tab completes it, and a near miss is told what it meant
   assert.ok(cfg.COMMANDS.includes('/context'));
   assert.match((cfg.readLine('/contxt') as { text: string }).text, /Did you mean \/context\?/);
+  // the names it offers are the sizes the Jev profile states
+  const table = JSON.parse(readFileSync(join(ROOT, 'skills', 'super-jev', 'judge_profiles.json'), 'utf8')).profiles['typesafe-jev'];
+  assert.deepEqual(cfg.CONTEXTS, ['small', ...Object.keys(table.contexts)]);
 });

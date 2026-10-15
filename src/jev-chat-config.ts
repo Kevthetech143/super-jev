@@ -5,20 +5,24 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { styleText, stripVTControlCharacters } from 'node:util';
 
-export const COMMANDS = ['/check', '/right', '/wrong', '/status', '/help', '/exit'];
+export const COMMANDS = ['/check', '/right', '/wrong', '/status', '/context', '/help', '/exit'];
+/** The sizes /context takes: how much of each note a search reads (small is what it always read; judge_profiles.json says each one's size). */
+export const CONTEXTS = ['small', 'medium', 'large'];
 /** How a user gets back to the window: the one wording every screen and message uses. */
 export const OPEN = 'open the window (npm run jev, or superjev with no words)';
 
 export type Turn =
   | { kind: 'empty' | 'help' | 'version' | 'exit' | 'status' | 'wrong' }
   | { kind: 'right'; rank: number }
+  | { kind: 'context'; name?: string /* none: show the one in use */ }
   | { kind: 'ask' | 'check' | 'say'; text: string }
   | { kind: 'connect'; path: string; dir: boolean; pointer?: string /* the engine's own name for a set to refresh */ };
-export type Session = { principal: string; skillDir: string; connected: Set<string>; last?: string /* the last question asked in this session */ };
+export type Session = { principal: string; skillDir: string; connected: Set<string>; last?: string /* the last question asked in this session */;
+  context?: string /* the size /context chose for this window; every helper call then carries it */ };
 export type Look = { width: number; color: boolean; home: string; keyEnv?: string; keySource?: 'env' | 'file' | 'none'; vendor?: string;
   door?: boolean /* the one-shot door: no window is open yet */ };
 // noNext: no Next line: the turn was a status (a next step would only point back at it), or the window is about to do the fix itself.
-export type Shown = { kind: 'ask' | 'check' | 'right' | 'wrong' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
+export type Shown = { kind: 'ask' | 'check' | 'right' | 'wrong' | 'status' | 'context' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
   refreshed?: boolean; declined?: boolean; noNext?: boolean; stopped?: boolean; hint?: boolean };
 
 // ---------------------------------------------------------------- reading a line
@@ -87,6 +91,11 @@ export function readLine(line: string, home: string = process.env.HOME ?? ''): T
   if (cmd === '/help') return { kind: 'help' };
   if (cmd === '/exit') return { kind: 'exit' };
   if (cmd === '/status') return { kind: 'status' };
+  if (cmd === '/context') {
+    const name = rest.toLowerCase();
+    return !rest ? { kind: 'context' } : CONTEXTS.includes(name) ? { kind: 'context', name }
+      : { kind: 'say', text: 'Usage: /context [small|medium|large]   how much of each note is read' };
+  }
   if (cmd === '/wrong') return { kind: 'wrong' };
   if (cmd === '/right') {
     const n = rest === '' ? 1 : /^\d$/.test(rest) ? Number(rest) : 0;
@@ -109,10 +118,10 @@ const literalName = (n: string) => n.replace(/[[\]*?]/g, (c) => `[${c}]`);
 
 /** The helper's argv, script path first. Never run through a shell. */
 export function helperCall(turn: Turn, s: Session): string[] {
-  const ask = [join(s.skillDir, 'ask.py'), '--principal', s.principal, '--json'];
+  const ask = [join(s.skillDir, 'ask.py'), '--principal', s.principal, ...(s.context ? ['--context', s.context] : []), '--json'];
   if (turn.kind === 'ask') return [...ask, '--', turn.text];
   if (turn.kind === 'check') return [...ask, '--claim', turn.text];
-  if (turn.kind === 'status') return [...ask, '--status'];
+  if (turn.kind === 'status' || turn.kind === 'context') return [...ask, '--status'];
   if (turn.kind === 'right') return [...ask, '--approve', s.last ?? '', '--rank', String(turn.rank)];
   if (turn.kind === 'wrong') return [...ask, '--miss', s.last ?? ''];
   if (turn.kind !== 'connect') throw new Error(`no helper call for ${turn.kind}`);
@@ -169,6 +178,10 @@ export const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
 const sentence = (s: string) => (/[.!?]$/.test(s) ? s : s + '.');
 const uniq = (xs: string[]) => [...new Set(xs)];
 
+/** Where the size in use came from, in the app's words (the helper says flag, env, settings or default). */
+const CONTEXT_WHERE: Record<string, string> = { flag: 'this window', env: 'SUPERJEV_CONTEXT', settings: 'saved default', default: 'the default' };
+const contextRow = (c: any) => `Context: ${String(c.preset).charAt(0).toUpperCase()}${String(c.preset).slice(1)} (${CONTEXT_WHERE[c.source] ?? c.source})`;
+
 export const HELP = [
   'Ask a question in plain words, or:',
   '  drag a folder in    connect its Markdown notes',
@@ -176,6 +189,7 @@ export const HELP = [
   '  /right [n]          the last answer was right: save it now',
   '  /wrong              the last answer was wrong: forget it',
   '  /status             show what is connected',
+  '  /context [name]     how much of each note is read',
   '  /help or ?          show this list',
   '  /exit               leave (Ctrl+D works too)'].join('\n');
 /** What `superjev --help` leads with, before the list. */
@@ -313,6 +327,8 @@ export function render(shown: Shown, look: Look): string {
   } else if (o === 'not-supported') {
     head('Not answered'); body(d.why ?? '');
     if (shown.kind !== 'status' && d.next === 'rephrase') next('ask one focused question.');
+  } else if (shown.kind === 'context') {
+    if (d.context) head(contextRow(d.context)); else crash('The helper did not say which size is in use.');
   } else if (shown.kind === 'status') {
     const sets: any[] = d.sets ?? [];
     if (d.next === 'setup' || !sets.length) empty(d.next === 'setup');
@@ -322,6 +338,7 @@ export function render(shown: Shown, look: Look): string {
       // Two sets with the same folder (a folder, then one note in it) are told apart by their name.
       for (const s of sets) body([at(s), gap(plural(s.notes ?? 0, 'note')), gap(s.state), ...(sets.filter((x) => at(x) === at(s)).length > 1 ? [tag(s.name)] : [])]);
     }
+    if (d.context && d.next !== 'setup') body(contextRow(d.context));
   } else if (d.claim) {
     const c = d.claim;
     if (c.verdict === 'NOT FOUND') { head(headline(`NOT FOUND in the ${plural(c.read ?? 0, 'note')} read`)); body('It may be in a note not read or not connected.'); }
