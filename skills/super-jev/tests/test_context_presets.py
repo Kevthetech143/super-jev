@@ -180,6 +180,26 @@ BROKEN = {
     "a header with no threshold": lambda p: p.pop("long_context_above_tokens"),
     "no read_chars": lambda p: p.pop("read_chars"),
     "no nav_timeout_ms": lambda p: p.pop("nav_timeout_ms"),
+    # a whole number is read as strictly as Node's Number.isInteger reads it: text, a fraction and true are not
+    "a row number written as text": lambda p: p["contexts"]["large"].update(read_chars="112000"),
+    "a row number with a fraction": lambda p: p["contexts"]["large"].update(window_tokens=262_144.5),
+    "a row number that is true": lambda p: p["contexts"]["medium"].update(nav_timeout_ms=True),
+    "read_chars written as text": lambda p: p.update(read_chars="14000"),
+    "nav_timeout_ms with a fraction": lambda p: p.update(nav_timeout_ms=15_000.5),
+    "a threshold written as text": lambda p: p.update(long_context_above_tokens="65536"),
+    # contexts is a table of rows, and each row is a table
+    "contexts that is not a table": lambda p: p.update(contexts=[]),
+    "a row that is not a table": lambda p: p["contexts"].update(medium=5),
+    "a row that is null": lambda p: p["contexts"].update(medium=None),
+    "a default that is null": lambda p: p.update(default_context=None),
+}
+#: edits that leave a table both loaders accept and read the same way
+FINE = {
+    "a whole number written with a decimal point": lambda p: p["contexts"]["medium"].update(read_chars=56_000.0),
+    "no default_context": lambda p: p.pop("default_context"),
+    "an empty contexts table": lambda p: p.update(contexts={}),
+    "a label that is not text": lambda p: p["contexts"]["medium"].update(label=7),
+    "a row with no label": lambda p: p["contexts"]["medium"].pop("label"),
 }
 
 
@@ -196,21 +216,65 @@ def _camel(name):
     return re.sub(r"_([a-z])", lambda m: m.group(1).upper(), name)
 
 
-def test_python_and_node_loaders_agree_on_every_preset():
-    cases = [(key, ctx) for key in _raw() for ctx in ["small", *_raw()[key].get("contexts", {})]]
-    assert ("typesafe-jev", "large") in cases, "the table has no presets to compare"
+def _node_loads(cases):
+    """Each (profile, preset, table path or None) loaded by the Node loader, all in one process:
+    {"profile": ...} or {"error": message} per case."""
+    assert shutil.which(NODE), f"node is missing: {NODE}"
     script = ("import { loadJudgeProfile } from './src/judge-profile.ts';"
               f"const cases = {json.dumps(cases)};"
-              "console.log(JSON.stringify(cases.map(([key, ctx]) => loadJudgeProfile(key, undefined, {}, ctx))));")
-    assert shutil.which(NODE), f"node is missing: {NODE}"
+              "console.log(JSON.stringify(cases.map(([key, ctx, file]) => {"
+              " try { return { profile: loadJudgeProfile(key, file ?? undefined, {}, ctx) }; }"
+              " catch (e) { return { error: String(e.message) }; } })));")
     run = subprocess.run([NODE, "--input-type=module", "-e", script], cwd=REPO, capture_output=True, text=True,
                          timeout=120)
     assert run.returncode == 0, run.stderr
-    node = json.loads(run.stdout)
-    assert len(node) == len(cases)
-    for (key, ctx), got in zip(cases, node):
-        want = judge_profile.load(key, context=ctx)
-        fields = json.loads(json.dumps(dataclasses.asdict(want)))
-        fields.update(input_cap_tokens=want.input_cap_tokens, call_tokens=want.call_tokens)
-        for field, value in fields.items():
-            assert got[_camel(field)] == value, (key, ctx, field)
+    out = json.loads(run.stdout)
+    assert len(out) == len(cases)
+    return out
+
+
+def _python_loads(key, ctx, path):
+    try:
+        return {"profile": judge_profile.load(key, path=path, context=ctx)}
+    except (SystemExit, ValueError) as e:
+        return {"error": str(e)}
+
+
+def _same_profile(want, got, where):
+    """Every field the Python profile reports, the Node profile reports the same (camelCase)."""
+    fields = json.loads(json.dumps(dataclasses.asdict(want)))
+    fields.update(input_cap_tokens=want.input_cap_tokens, call_tokens=want.call_tokens)
+    for field, value in fields.items():
+        assert got[_camel(field)] == value, (*where, field)
+
+
+def test_python_and_node_loaders_agree_on_every_preset():
+    cases = [(key, ctx, None) for key in _raw() for ctx in ["small", *_raw()[key].get("contexts", {})]]
+    assert ("typesafe-jev", "large", None) in cases, "the table has no presets to compare"
+    for (key, ctx, _), got in zip(cases, _node_loads(cases)):
+        assert "profile" in got, (key, ctx, got)
+        _same_profile(judge_profile.load(key, context=ctx), got["profile"], (key, ctx))
+
+
+def test_python_and_node_loaders_accept_and_reject_the_same_tables(tmp_path):
+    """One table, two readers: whatever one stops on, the other stops on, and what both read they read alike."""
+    cases, kinds = [], []
+    tables = sorted([(w, e, False) for w, e in BROKEN.items()] + [(w, e, True) for w, e in FINE.items()],
+                    key=lambda t: t[0])
+    for i, (what, edit, fine) in enumerate(tables):
+        (tmp_path / str(i)).mkdir()
+        path = str(_edited(tmp_path / str(i), edit))
+        for ctx in ("small", "medium"):
+            cases.append(("typesafe-jev", ctx, path))
+            kinds.append((what, fine))
+    assert len(cases) == 2 * (len(BROKEN) + len(FINE))
+    for (key, ctx, path), (what, fine), got in zip(cases, kinds, _node_loads(cases)):
+        want = _python_loads(key, ctx, path)
+        assert ("profile" in want) == ("profile" in got), (what, ctx, "python", want, "node", got)
+        if not fine:
+            assert "error" in want and "error" in got, (what, ctx)
+            assert "judge limits table" in got["error"], (what, got)
+        elif "profile" in want:
+            _same_profile(want["profile"], got["profile"], (what, ctx))
+        if fine and ctx == "small":
+            assert "profile" in want, (what, want)

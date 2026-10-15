@@ -140,7 +140,19 @@ const BROKEN: Record<string, (p: any) => void> = {
   'a header with no threshold': p => { delete p.long_context_above_tokens; },
   'a row number that is not a number': p => { p.contexts.large.read_chars = 'lots'; },
   'no read_chars': p => { delete p.read_chars; },
-  'no nav_timeout_ms': p => { delete p.nav_timeout_ms; }
+  'no nav_timeout_ms': p => { delete p.nav_timeout_ms; },
+  // a whole number is read as strictly as the Python loader reads it: text, a fraction and true are not
+  'a row number written as text': p => { p.contexts.large.read_chars = '112000'; },
+  'a row number with a fraction': p => { p.contexts.large.window_tokens = 262_144.5; },
+  'a row number that is true': p => { p.contexts.medium.nav_timeout_ms = true; },
+  'read_chars written as text': p => { p.read_chars = '14000'; },
+  'nav_timeout_ms with a fraction': p => { p.nav_timeout_ms = 15_000.5; },
+  'a threshold written as text': p => { p.long_context_above_tokens = '65536'; },
+  // contexts is a table of rows, and each row is a table
+  'contexts that is not a table': p => { p.contexts = []; },
+  'a row that is not a table': p => { p.contexts.medium = 5; },
+  'a row that is null': p => { p.contexts.medium = null; },
+  'a default that is null': p => { p.default_context = null; }
 };
 for (const [what, edit] of Object.entries(BROKEN)) {
   test(`a broken presets table stops with one line: ${what}`, () => {
@@ -151,3 +163,23 @@ for (const [what, edit] of Object.entries(BROKEN)) {
     });
   });
 }
+
+test('a broken table is named by the file that was read, not by the shipped one', () => {
+  assert.throws(() => loadJudgeProfile('typesafe-jev', edited(p => { p.default_context = 'huge'; })), (e: Error) => {
+    assert.match(e.message, /judge limits table profiles\.json: /);
+    return true;
+  });
+});
+
+test('a default_context, or a contexts table, may be left out: the profile is read and says small', () => {
+  assert.equal(loadJudgeProfile('typesafe-jev', edited(p => { delete p.default_context; })).defaultContext, 'small');
+  const alone = edited(p => { p.contexts = {}; });
+  assert.equal(loadJudgeProfile('typesafe-jev', alone).defaultContext, 'small');
+  assert.throws(() => loadJudgeProfile('typesafe-jev', alone, {}, 'medium'), { message: 'unknown context "medium" (choose small)' });
+});
+
+test('a label that is not text, or no label, shows the preset name capitalised', () => {
+  for (const edit of [(p: any) => { p.contexts.medium.label = 7; }, (p: any) => { delete p.contexts.medium.label; }]) {
+    assert.equal(loadJudgeProfile('typesafe-jev', edited(edit), {}, 'medium').contextLabel, 'Medium');
+  }
+});
