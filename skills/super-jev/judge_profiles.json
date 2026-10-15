@@ -5,7 +5,7 @@
   "typesafe-jev": {
    "_source": "window: the measured hard input ceiling; questions: the per-call cap every batcher plans under; price: docs.typesafe.ai, checked 2026-09-16",
    "api_url": "https://api.typesafe.ai/v1/systemone",
-   "model": "jev-latest",
+   "model": "jev-1.13.0",
    "window_tokens": 32768,
    "max_questions_per_call": 255,
    "input_usd_per_mtok": 0.042,
