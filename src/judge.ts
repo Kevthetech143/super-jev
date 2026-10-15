@@ -9,6 +9,8 @@ import { Jev } from './jev.ts';
 import { payloadHasSecret } from './secret-scan.ts';
 
 export { JudgeError, NoKey, AuthRejected, Unreachable, Overloaded, BadReply, TooBig, SecretBlocked } from './judge-errors.ts';
+// How many requests this process has sent in the judge's long-input mode (see jev.ts).
+export { longCalls } from './jev.ts';
 
 /** Name of the environment variable that holds the selected judge's key. */
 export function keyEnv(profile: JudgeProfile = JUDGE_PROFILE): string { return profile.keyEnv; }
@@ -27,14 +29,17 @@ export function requireKey(purpose = 'use the live judge', fail?: (message: stri
   throw fail ? fail(message) : new NoKey(message, `${keyEnv()} is not set`);
 }
 
-const IMPLEMENTATIONS: Record<string, (options: { apiKey?: string; model?: string; fetch?: typeof fetch }) => Evaluator> = {
+type JudgeOptions = { apiKey?: string; model?: string; fetch?: typeof fetch; profile?: JudgeProfile };
+const IMPLEMENTATIONS: Record<string, (options: JudgeOptions) => Evaluator> = {
   jev: options => new Jev(options)
 };
 
-/** The selected judge. `fetch` and `apiKey` are for tests. */
-export function getJudge(options: { apiKey?: string; model?: string; fetch?: typeof fetch } = {}): Evaluator {
-  const make = IMPLEMENTATIONS[JUDGE_PROFILE.kind];
-  if (!make) throw new JudgeError('bad-reply', `no implementation for judge kind ${JSON.stringify(JUDGE_PROFILE.kind)}`);
+/** The selected judge, read at `profile` (default: the one SUPERJEV_JUDGE picks, at small; a context preset is a profile loaded at
+ * that preset, see judge-profile.ts). `fetch` and `apiKey` are for tests. */
+export function getJudge(options: JudgeOptions = {}): Evaluator {
+  const kind = (options.profile ?? JUDGE_PROFILE).kind;
+  const make = IMPLEMENTATIONS[kind];
+  if (!make) throw new JudgeError('bad-reply', `no implementation for judge kind ${JSON.stringify(kind)}`);
   return guarded(make(options));
 }
 

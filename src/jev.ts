@@ -1,6 +1,6 @@
 import type { Evaluator, Request, Evaluation, Answer } from './types.ts';
 import { payloadHasSecret } from './secret-scan.ts';
-import { JUDGE_PROFILE, type JudgeProfile } from './judge-profile.ts';
+import { JUDGE_PROFILE, judgeTokens, type JudgeProfile } from './judge-profile.ts';
 import { AuthRejected, BadReply, NoKey, Overloaded, SecretBlocked, TooBig, Unreachable } from './judge-errors.ts';
 
 // Every rule below is sourced in docs/provider-contract.md, which labels each
@@ -207,6 +207,16 @@ export function keyMayGoTo(url: string, apiUrl: string): boolean {
   } catch { return false; }
 }
 
+// The long-context header. A profile may name a [name, value] request header that lifts the judge's input limit past its normal one
+// (judge-profile.ts: longContextHeader, longContextAboveTokens). Jev sends it on a request only when the profile's own window is past
+// that limit AND the request is more than small's call budget can carry, measured the way the Python client measures to refuse one:
+// the state plus the longest question, in judge tokens. A request small can carry never asks for it, whatever the preset, so small
+// sends exactly what it always sent. The name, the value and the limit are the profile's, never a literal here.
+let longRequests = 0;
+/** How many requests this process has sent with the long-context header, a request sent again counting each time: the check that a run
+ * at a larger preset really used the judge's long-input mode. A count for the process, not for one Jev, because getJudge hands back a wrapper. */
+export function longCalls(): number { return longRequests; }
+
 export class Jev implements Evaluator {
   private key: string;
   private model: string;
@@ -228,6 +238,15 @@ export class Jev implements Evaluator {
     if (status === this.profile.tooBigStatus && /too (large|long|big)|context (length|window)|token limit|maximum context|exceeds the|payload too/i.test(body)) return new TooBig(message);
     return new BadReply(message);
   }
+  /** The [name, value] header this request needs, else null: the profile states one, its window is past the limit it lifts, the request
+   * is over small's call budget, and it is going to the profile's own host or this machine (where the key may go). */
+  private longContextHeader(request: Request, url: string): readonly [string, string] | null {
+    const p = this.profile;
+    if (!p.longContextHeader || typeof p.longContextAboveTokens !== 'number' || p.windowTokens <= p.longContextAboveTokens) return null;
+    if (!keyMayGoTo(url, p.apiUrl)) return null;
+    const longest = Object.values(request.questions).reduce((most, q) => Math.max(most, judgeTokens(q)), 0);
+    return judgeTokens(request.state) + longest > p.baseCallTokens ? p.longContextHeader : null;
+  }
   private async _post(request: Request, signal: AbortSignal, pin: JudgePin) {
     const payload = { model: this.model, ...pin, ...request };
     // The one choke point for every TypeSafe send: scan the whole body first.
@@ -237,9 +256,12 @@ export class Jev implements Evaluator {
       if (this.key && !keyMayGoTo(url, this.profile.apiUrl)) {
         throw new AuthRejected(`${this.profile.judgeName} URL override points at another host`, `${this.profile.apiUrlEnv} points at a host other than this judge's own; the API key is never sent there, so nothing was sent`);
       }
+      // Decided here, for every send, so the first try and the unpinned retry of one request decide alike.
+      const long = this.longContextHeader(request, url);
+      if (long) longRequests++;
       return await this.transport(url, {
         method: 'POST', signal,
-        headers: { ...(this.key ? { Authorization: `Bearer ${this.key}` } : {}), 'Content-Type': 'application/json' },
+        headers: { ...(this.key ? { Authorization: `Bearer ${this.key}` } : {}), 'Content-Type': 'application/json', ...(long ? { [long[0]]: long[1] } : {}) },
         body: JSON.stringify(payload)
       });
     } catch (error) {
