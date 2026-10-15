@@ -6,6 +6,7 @@ one function every size check calls, no second selector.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -27,7 +28,7 @@ OLD = {
     "jev_client.MAX_QUESTIONS": 255,
     "jev_client.LINE": 0.80,
     "jev_client.API_URL": "https://api.typesafe.ai/v1/systemone",
-    "jev_client.MODEL": "jev-latest",
+    "jev_client.MODEL": "jev-1.13.0",  # pinned (it was written in place as the moving alias jev-latest)
     "prepare_bulk.CEILING_BYTES": 250_000,
     "connect_checked.CEILING_MSG": "exceeds the 32,768-token ceiling",
 }
@@ -68,6 +69,14 @@ def test_default_profile_derives_every_old_number_exactly():
     assert got.pop("same_fn") is True
     assert got == OLD
     assert type(got["superjev.JUDGE_CALL_TOKENS"]) is int
+
+
+def test_the_model_is_pinned_to_a_dated_release():
+    """The Jev profile names one dated release (jev-X.Y.Z), never the moving alias jev-latest, so the
+    model a build sends changes only when this table does. Adopting a newer release means changing the pin."""
+    pinned = json.loads(judge_profile.PROFILES_PATH.read_text())["profiles"]["typesafe-jev"]["model"]
+    assert re.fullmatch(r"jev-\d+\.\d+\.\d+", pinned), f"{pinned!r} is an alias, not a dated release"
+    assert judge_profile.load("typesafe-jev").model == pinned
 
 
 def test_the_jev_profile_states_its_limits_and_nothing_speculative():

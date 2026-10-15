@@ -65,7 +65,7 @@ test('tool failures are not retried and secret errors are not logged', async () 
 test('Jev adapter sends documented payload and validates response', async () => {
   const fake: typeof fetch = async (url, init) => {
     assert.equal(url, 'https://api.typesafe.ai/v1/systemone');
-    assert.equal(JSON.parse(String(init?.body)).model, 'jev-latest');
+    assert.equal(JSON.parse(String(init?.body)).model, 'jev-1.13.0');
     assert.equal((init?.headers as any).Authorization, 'Bearer fixture');
     return new Response(JSON.stringify({ model: 'jev-latest', answers: { ok: { type: 'noul', noul: 0.8 } } }));
   };

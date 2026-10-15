@@ -120,7 +120,7 @@ def test_c_a_second_profile_changes_behaviour_only_through_the_profile(tmp_path,
     monkeypatch.setenv("OTHER_JUDGE_KEY", "other-key")
     monkeypatch.delenv("SUPERJEV_JEV_URL", raising=False)
     base_sent, base_chunks, base_code = run(load_client("jc_base"))
-    assert base_sent[0] == ("https://api.typesafe.ai/v1/systemone", "jev-latest", "Bearer jev-key")
+    assert base_sent[0] == ("https://api.typesafe.ai/v1/systemone", "jev-1.13.0", "Bearer jev-key")
     assert base_code == 0                      # a 0.90 SUPPORTED clears the 0.80 line
 
     monkeypatch.setattr(judge_profile, "PROFILES_PATH", path)

@@ -61,7 +61,7 @@ test('defaults: no pin is sent when SUPERJEV_JUDGE_TEMPERATURE is unset', async 
   const b = bodies(calls)[0];
   assert.ok(!('temperature' in b), 'temperature must not be sent when SUPERJEV_JUDGE_TEMPERATURE is unset');
   assert.ok(!('seed' in b), 'seed must not be sent when SUPERJEV_JUDGE_SEED is unset');
-  assert.equal(b.model, 'jev-latest');
+  assert.equal(b.model, 'jev-1.13.0');
   assert.deepEqual(ev.answers.q1, { type: 'noul', noul: 0.7 });
 });
 

@@ -6,6 +6,6 @@
    "Authorization": "Bearer test-not-a-key",
    "Content-Type": "application/json"
   },
-  "body": "{\"model\":\"jev-latest\",\"state\":\"EVIDENCE:\\nplain state\",\"questions\":{\"ok\":{\"type\":\"noul\",\"instructions\":\"Is it true?\"},\"pick\":{\"type\":\"choice\",\"instructions\":\"Pick.\",\"criteria\":{\"A\":\"a\",\"B\":\"b\"}}}}"
+  "body": "{\"model\":\"jev-1.13.0\",\"state\":\"EVIDENCE:\\nplain state\",\"questions\":{\"ok\":{\"type\":\"noul\",\"instructions\":\"Is it true?\"},\"pick\":{\"type\":\"choice\",\"instructions\":\"Pick.\",\"criteria\":{\"A\":\"a\",\"B\":\"b\"}}}}"
  }
 ]
