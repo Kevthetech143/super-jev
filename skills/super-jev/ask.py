@@ -929,7 +929,10 @@ def pointer_benched(health: dict, ptr: str, principal: str = ""):
 # and complete-answer comparisons do not override it. Unfinished checks remain
 # explicit. Claim mode retains its separate support/contradiction judgment.
 CONFIRM_CHUNK = 3500
-READ_CHARS = judges.profile().read_chars  # most text one file's check sends at the preset small: the profile's own number
+# Most text one file's check sends at the preset small: the profile's own number. Read from judge_profile, the file this
+# build ships, not through judges.profile(): scorecard.py loads two builds in one process and the second one is handed the
+# first one's judges package, whose profile may be an older build's.
+READ_CHARS = judge_profile.PROFILE.read_chars
 # A file this small is judged whole in one passage: split into pieces, a table or a list
 # spreads Jev's confidence across them and none reaches the bar. Same text sent either way.
 WHOLE_FILE_CHARS = 12000
@@ -944,7 +947,7 @@ def read_budget(path=None) -> int:
     name = _CONTEXT["name"]
     if name == judge_profile.SMALL or _CLAIM["text"] or path in _CONTEXT["small_paths"]:
         return READ_CHARS
-    return judge_profile.load(judges.profile().name, context=name).read_chars
+    return judge_profile.load(judge_profile.PROFILE.name, context=name).read_chars
 
 # Judge calibration (measured per judge): read from the profile, judge_profiles.json.
 CONFIRM_FLOOR = judges.profile().confirm_floor

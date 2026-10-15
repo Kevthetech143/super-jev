@@ -353,7 +353,7 @@ def filled(chunks, picked, budget):
 
 
 def test_read_budget_is_14000_at_small_and_comes_from_the_profile(monkeypatch):
-    prof = ask.judges.profile()
+    prof = judge_profile.PROFILE
     assert prof.read_chars == ask.READ_CHARS == 14_000
     assert ask.read_budget() == 14_000 and ask.read_budget("any/note.md") == 14_000  # small is the preset when none is chosen
     for preset, chars in PRESETS.items():  # the others come from the same table: nothing in ask.py states a size
@@ -367,6 +367,21 @@ def test_read_budget_is_14000_at_small_and_comes_from_the_profile(monkeypatch):
     assert other.READ_CHARS == other.read_budget() == 9_000
     # the factor the old size was built from is gone (named in two pieces: the proof command greps the repo for it)
     assert not hasattr(ask, "CONFIRM_CHUNKS" + "_PER_FILE")
+
+
+def test_ask_loads_beside_an_older_build_whose_profile_has_no_read_chars(monkeypatch):
+    """scorecard.py grades two builds in one process: before it loads the second it drops the first one's sibling files,
+    but not its `judges` package, so the second is handed a profile that may be an older build's."""
+    class Older:
+        def __getattr__(self, name):
+            if name == "read_chars":
+                raise AttributeError(name)
+            return getattr(judge_profile.PROFILE, name)
+    monkeypatch.setattr(ask.judges, "profile", lambda: Older())
+    beside = importlib.util.spec_from_file_location("ask_read_budget_beside", SKILL / "ask.py")
+    other = importlib.util.module_from_spec(beside)
+    beside.loader.exec_module(other)
+    assert other.READ_CHARS == 14_000
 
 
 def test_medium_reads_every_passage_of_a_40kb_note(tmp_path, monkeypatch):
