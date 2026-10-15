@@ -928,11 +928,24 @@ def pointer_benched(health: dict, ptr: str, principal: str = ""):
 # the answer. The same rule applies to every query; route confidence, filenames
 # and complete-answer comparisons do not override it. Unfinished checks remain
 # explicit. Claim mode retains its separate support/contradiction judgment.
-CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 3500, 4
-READ_CHARS = CONFIRM_CHUNK * CONFIRM_CHUNKS_PER_FILE  # most text one file's check sends
+CONFIRM_CHUNK = 3500
+READ_CHARS = judges.profile().read_chars  # most text one file's check sends at the preset small: the profile's own number
 # A file this small is judged whole in one passage: split into pieces, a table or a list
 # spreads Jev's confidence across them and none reaches the bar. Same text sent either way.
 WHOLE_FILE_CHARS = 12000
+# The context preset this ask reads at (small, medium or large) and the files re-sent at small after a read at a larger
+# one failed. Set once per ask; small, the profile as written, until something sets it.
+_CONTEXT = {"name": judge_profile.SMALL, "small_paths": set()}
+
+def read_budget(path=None) -> int:
+    """The most characters of one note a content check reads: the preset's read_chars (judge_profiles.json), except
+    small's READ_CHARS for a claim check (its shape was tuned for a few passages) and for a file in
+    _CONTEXT["small_paths"]. pick_chunks spends it."""
+    name = _CONTEXT["name"]
+    if name == judge_profile.SMALL or _CLAIM["text"] or path in _CONTEXT["small_paths"]:
+        return READ_CHARS
+    return judge_profile.load(judges.profile().name, context=name).read_chars
+
 # Judge calibration (measured per judge): read from the profile, judge_profiles.json.
 CONFIRM_FLOOR = judges.profile().confirm_floor
 SOURCE_FLOOR = judges.profile().source_floor
@@ -1064,7 +1077,7 @@ def confirm_start(question: str, path: str):
     # One read rule: a file the zoom chose parts of is read as those parts, each with its line range, so the best
     # one carries a location; the whole file is not sent beside them. A chosen part is never cut: one longer than a
     # passage is split into passages the way a long file is, each with its own line range, and they are picked
-    # within READ_CHARS like a long file's. A file with no named parts (or read from the word search's list when the
+    # within the read budget like a long file's. A file with no named parts (or read from the word search's list when the
     # zoom failed) is read as before: whole when short, else the passages the word overlap picks.
     tparts, extra = part_passages(text.split("\n"), (_STAGE.get("toc_parts") or {}).get(path) or [])
     chunks = [] if tparts else [text] if len(text) <= WHOLE_FILE_CHARS else split_passages(text)
@@ -1077,7 +1090,9 @@ def confirm_start(question: str, path: str):
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
     base = len(chunks)
-    picked = ((pick_chunks(question, chunks) if chunks else []) + [base + i for i in (pick_chunks(question, extra) if extra else [])]
+    budget = read_budget(path)
+    picked = ((pick_chunks(question, chunks, budget) if chunks else [])
+              + [base + i for i in (pick_chunks(question, extra, budget) if extra else [])]
               + ([base + len(extra)] if outl else []))
     chunks = chunks + extra + ([outl["text"]] if outl else [])
     outline_i = base + len(extra) if outl else None
@@ -1676,16 +1691,15 @@ def with_subject(chunks: list, i: int) -> str:
     title = next((ln.strip() for ln in chunks[0].splitlines() if ln.strip()), "")[:SUBJECT_CHARS]
     return f"{title}{SUBJECT_SEP}{chunks[i]}" if title else chunks[i]
 
-def pick_chunks(question: str, chunks: list) -> list:
-    """Indexes to read, in file order: every passage if they fit in READ_CHARS, else
-    the passages scoring best by BM25 on the question's words (each word weighted by
-    how rare it is within this file; earlier passages win ties, so a file with few
-    matches is read from its top) until READ_CHARS is spent. Counting distinct words,
-    with the first chunk always read, spent the slots on the intro and on passages
-    full of the file's common words, missing the one section that answered."""
+def pick_chunks(question: str, chunks: list, budget: int = READ_CHARS) -> list:
+    """Indexes to read, in file order: every passage if they fit in `budget` characters (read_budget(); small's
+    READ_CHARS when none is given), else the passages scoring best by BM25 on the question's words (each word
+    weighted by how rare it is within this file; earlier passages win ties, so a file with few matches is read
+    from its top) until the budget is spent. Counting distinct words, with the first chunk always read, spent the
+    slots on the intro and on passages full of the file's common words, missing the one section that answered."""
     # A passage after the first is sent led by the file's title (with_subject).
     cost = [len(c) + (SUBJECT_CHARS + len(SUBJECT_SEP) if i else 0) for i, c in enumerate(chunks)]
-    if sum(cost) <= READ_CHARS:
+    if sum(cost) <= budget:
         return list(range(len(chunks)))
     terms = query_terms(question)
     tfs = []
@@ -1703,7 +1717,7 @@ def pick_chunks(question: str, chunks: list) -> list:
              for f, size in zip(tfs, sizes)]
     picked, used = [], 0
     for i in sorted(range(len(chunks)), key=lambda i: (-score[i], i)):
-        if used + cost[i] <= READ_CHARS:
+        if used + cost[i] <= budget:
             picked.append(i)
             used += cost[i]
         elif not score[i]:
