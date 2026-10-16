@@ -76,6 +76,32 @@ def pytest_sessionfinish(session, exitstatus):
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_toc: keeps the real TOC search (no replay of faked navigate candidates)")
     config.addinivalue_line("markers", "real_code_ask: uses the real fleet jev lib; skips when the lib file is absent")
+    config.addinivalue_line("markers", "shipped_table: reads the judge table this build ships, with no made-up large row")
+
+
+_LARGE_ROW = Path(_SKILL_ROOT).parent.parent / "test" / "fixtures" / "large-row.json"
+
+
+@pytest.fixture
+def large_row(monkeypatch, tmp_path):
+    """A made-up judge table for the tests that need a `large` size. The shipped table offers Small and Medium only (Large
+    waits for its own test), but the mechanism behind a bigger size (the loaders, the read budget, the fallback to small, the
+    setting that picks one) is still tested: against the shipped table plus one made-up `large` row on the Jev profile.
+    judge_profile.PROFILES_PATH reads it, context_setting.NAMES names the size, and SJ_TABLE points a Node child process
+    at it too (test/fixtures/judge-table-hook.cjs, preloaded with --require). The shipped table is never edited. Returns the
+    table's path. Node twin: test/large-table.ts."""
+    import sys
+    sys.path.insert(0, _SKILL_ROOT)
+    import context_setting
+    import judge_profile
+    data = json.loads(judge_profile.PROFILES_PATH.read_text())
+    data["profiles"]["typesafe-jev"]["contexts"]["large"] = json.loads(_LARGE_ROW.read_text())
+    table = tmp_path / "table-with-large.json"
+    table.write_text(json.dumps(data))
+    monkeypatch.setattr(judge_profile, "PROFILES_PATH", table)
+    monkeypatch.setattr(context_setting, "NAMES", tuple(dict.fromkeys((*context_setting.NAMES, "large"))))
+    monkeypatch.setenv("SJ_TABLE", str(table))
+    return table
 
 
 @pytest.fixture(autouse=True)

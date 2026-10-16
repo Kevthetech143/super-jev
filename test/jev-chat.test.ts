@@ -275,16 +275,16 @@ test('S14b two sets with the same folder are told apart by their name; a folder 
 
 test('S15 help lists exactly the commands that exist, and ? is the same help', () => {
   const s = clean(cfg.render({ kind: 'help', data: {} }, OPTS));
-  assert.deepEqual([...new Set(s.match(/\/[a-z]+/g))].sort(), ['/check', '/exit', '/help', '/right', '/status', '/wrong']);
+  assert.deepEqual([...new Set(s.match(/\/[a-z]+/g))].sort(), ['/check', '/context', '/exit', '/help', '/right', '/status', '/wrong']);
   assert.match(s, /\?/);
   assert.equal(cfg.readLine('?').kind, 'help');
   assert.equal(cfg.readLine('/help').kind, 'help');
-  for (const c of ['/check x', '/status', '/help', '/exit', '/wrong', '/right', '/right 2']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
+  for (const c of ['/check x', '/status', '/help', '/exit', '/wrong', '/right', '/right 2', '/context', '/context medium']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
 });
 
 test('S15b help rows line up: every description starts in the same column, and a row fits 60 columns', () => {
   const rows = cfg.HELP.split('\n').slice(1);
-  assert.equal(rows.length, 7, 'the drag row and the six commands');
+  assert.equal(rows.length, 8, 'the drag row and the seven commands');
   const col = rows.map((l) => { const m = /^( {2}.+?\S)( {2,})(\S.*)$/.exec(l); assert.ok(m, `no description column in ${JSON.stringify(l)}`); return m![1].length + m![2].length; });
   assert.equal(new Set(col).size, 1, `descriptions start in columns ${col.join(', ')}:\n${cfg.HELP}`);
   for (const l of rows) assert.ok(l.length <= 60, l);

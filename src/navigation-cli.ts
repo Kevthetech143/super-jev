@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { getJudge } from './judge.ts';
+import { getJudge, longCalls } from './judge.ts';
+import { JUDGE_PROFILE, loadJudgeProfile } from './judge-profile.ts';
 import { navigate, NavigationError, providerFailureReason } from './enhance/navigation.ts';
 import { BatchingEvaluator } from './enhance/coalesce.ts';
 
@@ -20,10 +21,10 @@ async function stdin(): Promise<string> {
   return body.toString('utf8');
 }
 
-function checkedInput(input: unknown): { question?: unknown; catalog?: unknown; limits?: unknown; mode?: 'navigation' | 'source-evidence' | 'source-discovery' } {
+function checkedInput(input: unknown): { question?: unknown; catalog?: unknown; limits?: unknown; mode?: 'navigation' | 'source-evidence' | 'source-discovery'; context?: unknown } {
   if (!input || typeof input !== 'object') throw new NavigationError('Navigation input is invalid');
-  const value = input as { question?: unknown; catalog?: unknown; limits?: unknown; mode?: 'navigation' | 'source-evidence' | 'source-discovery' };
-  if (Object.keys(value).some(key => !['question', 'catalog', 'limits', 'mode'].includes(key)) || (value.limits !== undefined && (!value.limits || typeof value.limits !== 'object' || Array.isArray(value.limits) || Object.keys(value.limits).some(key => !['beamWidth', 'maxRounds', 'maxResults'].includes(key))))) throw new NavigationError('Navigation input is invalid');
+  const value = input as { question?: unknown; catalog?: unknown; limits?: unknown; mode?: 'navigation' | 'source-evidence' | 'source-discovery'; context?: unknown };
+  if (Object.keys(value).some(key => !['question', 'catalog', 'limits', 'mode', 'context'].includes(key)) || (value.limits !== undefined && (!value.limits || typeof value.limits !== 'object' || Array.isArray(value.limits) || Object.keys(value.limits).some(key => !['beamWidth', 'maxRounds', 'maxResults'].includes(key))))) throw new NavigationError('Navigation input is invalid');
   if (value.mode !== undefined && value.mode !== 'navigation' && value.mode !== 'source-evidence' && value.mode !== 'source-discovery') throw new NavigationError('Navigation mode is invalid');
   return value;
 }
@@ -37,17 +38,28 @@ async function main(): Promise<void> {
   try { input = JSON.parse(await stdin()); }
   catch (error) { throw error instanceof NavigationError ? error : new NavigationError('Navigation input is not valid JSON'); }
   if (!input || typeof input !== 'object') throw new NavigationError('Navigation input is invalid');
+  const batch = (input as { batch?: unknown }).batch;
+  if (batch !== undefined && (Object.keys(input).some(key => key !== 'batch' && key !== 'context') || !Array.isArray(batch) || !batch.length || batch.length > MAX_BATCH)) throw new NavigationError('Navigation input is invalid');
+  const single = batch === undefined ? checkedInput(input) : undefined;
+  // `context` names the preset (small, or a larger one the profile states: medium; judge_profiles.json) this whole run reads at: the judge's profile (so the
+  // long-context header rule), the batcher's call budget and the default timeout below. One preset per run: named at the top of the
+  // input, or on its batch items, and all alike. Absent means small, the profile as written.
+  const named = new Set([input, ...(Array.isArray(batch) ? batch : [])].map(part => (part as { context?: unknown } | null)?.context).filter(c => c !== undefined));
+  if (named.size > 1 || [...named].some(c => typeof c !== 'string')) throw new NavigationError('Navigation input is invalid');
+  const [context] = [...named] as string[];
+  let profile = JUDGE_PROFILE;
+  if (context !== undefined) {
+    try { profile = loadJudgeProfile(JUDGE_PROFILE.name, undefined, process.env, context); }
+    catch (error) { throw new NavigationError(error instanceof Error ? error.message : 'Navigation input is invalid'); }
+  }
   // SUPERJEV_NAV_TIMEOUT_MS raises the per-navigate provider timeout above navigate()'s
   // 5_000ms default (that default was too short for a busy provider under concurrent
   // navigate calls, surfacing as "Navigation provider timed out"). navigate() itself
   // rejects anything outside [1, 120_000], so an out-of-range or non-numeric value
-  // here falls back to 15_000 instead of failing every navigate call.
+  // here falls back to the preset's own timeout (15_000 at small) instead of failing every navigate call.
   const envTimeout = process.env.SUPERJEV_NAV_TIMEOUT_MS ? Number(process.env.SUPERJEV_NAV_TIMEOUT_MS) : undefined;
-  const timeoutMs = Number.isInteger(envTimeout) && (envTimeout as number) >= 1 && (envTimeout as number) <= 120_000 ? envTimeout : 15_000;
-  const batch = (input as { batch?: unknown }).batch;
-  if (batch !== undefined && (Object.keys(input).length !== 1 || !Array.isArray(batch) || !batch.length || batch.length > MAX_BATCH)) throw new NavigationError('Navigation input is invalid');
-  const single = batch === undefined ? checkedInput(input) : undefined;
-  const transport = new BatchingEvaluator(getJudge());
+  const timeoutMs = Number.isInteger(envTimeout) && (envTimeout as number) >= 1 && (envTimeout as number) <= 120_000 ? envTimeout : profile.navTimeoutMs;
+  const transport = new BatchingEvaluator(getJudge({ profile }), profile.callTokens);
   if (Array.isArray(batch)) {
     // {"batch": [navigate input, ...]}: every navigation runs at once and their Jev
     // questions share calls; one navigation's failure is its own error row.
@@ -59,11 +71,11 @@ async function main(): Promise<void> {
         return { status: 'error', reason: error instanceof NavigationError ? error.message : `Navigation failed: ${providerFailureReason(error)}` };
       }
     }));
-    process.stdout.write(JSON.stringify({ results, calls: transport.calls }) + '\n');
+    process.stdout.write(JSON.stringify({ results, calls: transport.calls, longCalls: longCalls() }) + '\n');
     return;
   }
   const result = await navigate(single!.catalog, single!.question, { ...(single!.limits as object | undefined), timeoutMs, transport, mode: single!.mode });
-  process.stdout.write(JSON.stringify(result) + '\n');
+  process.stdout.write(JSON.stringify({ ...result, longCalls: longCalls() }) + '\n');
 }
 
 main().catch(error => { process.stderr.write(`${error instanceof NavigationError ? error.message : `Navigation failed: ${providerFailureReason(error)}`}\n`); process.exitCode = 2; });

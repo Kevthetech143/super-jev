@@ -5,7 +5,8 @@
       Print the release (read from package.json, the one version source).
 
   ask.py --principal AGENT --status
-      Show this principal's connected snapshots and next steps, without a lookup.
+      Show this principal's connected snapshots and next steps, without a lookup, and the
+      context size in use (below).
 
   ask.py --principal AGENT --preflight [--project-dir DIR ...] [--about "the work"]
          [--skill "what a new skill would do"] [--json]
@@ -52,6 +53,29 @@
       before any verdict prints the OUTCOME line an ordinary ask prints, first.
       Only exit 0 passes.
 
+  ask.py --principal AGENT --set-context small|medium
+  ask.py --principal AGENT --context small|medium "question"
+      How much of each note one content check reads. small reads the best 14,000 characters of
+      a note (what it always read, and the default) and medium 56,000, so a long note is read
+      deeper; medium uses TypeSafe's experimental long-input mode on the longest reads. Large is
+      not offered yet: it comes after its own test, and asking for it is one line and exit 2.
+      --set-context saves the choice for this principal (the `context` key of
+      settings.json in its state folder, written atomically). --context picks it for one ask:
+      it may stand anywhere before a "--" (`--context medium --json -- "question"` works) and
+      after a "--" it is part of the question. The first of these that is set is used:
+      --context, the SUPERJEV_CONTEXT environment variable (only ask.py reads it), the saved
+      choice, then the judge profile's default_context. A name that is not an offered size,
+      or that the judge profile has no size for, is one line and exit 2. --claim always reads
+      at small. --status says the size in use, the default, and where the size came from.
+      When a note's check at medium fails (too long for the judge, too slow, turned down, not
+      reached, retries used up) and small would have read less of that note, the note is read again at
+      small, once, and the ask says so on the line right after the OUTCOME line: "CONTEXT: Medium did not
+      work this time (the judge was slow to answer), so this ask used Small. Small reads less of each
+      note. Try again later, or pick Small yourself with --context small." The answer, the OUTCOME and
+      the exit code are those of the run that gave it; if small fails too the first error stays and
+      nothing is said. A note that small reads whole is never read again for this, and an ask at small
+      adds no retry.
+
   ask.py --principal AGENT --json REQUEST
       For a program (the terminal app) instead of a person. REQUEST is a question, one
       --claim "statement", --status, --approve or --miss; any other mode (--add,
@@ -60,8 +84,11 @@
       out; no scores) and exits with text mode's code; a crash exits 3. An ask or claim:
       outcome, why, next (setup|key|connect|refresh|include|rephrase|none), files
       [{path, tier, line?, text?}], skills, skills_off, saved, saved_now, unsearched,
-      left_out, errors, claim. --status: {next, principal, sets}, or {outcome: error,
-      why} when it could not be read. --approve / --miss: {done, why, removed?}.
+      left_out, errors, claim, context ({preset, source}: only when the ask read at more than
+      small; plus fallback {files, reason, message} when a note was read again at small, reason
+      one of slow, too-long, turned-down, unreachable, problem). --status: {next, principal, sets,
+      context: {preset, default, source}}, or
+      {outcome: error, why} when it could not be read. --approve / --miss: {done, why, removed?}.
       --json is read only as the first word of the request, so after "--" or inside a
       question it is just text.
 
@@ -210,6 +237,7 @@ import judges  # noqa: E402
 import toc_search  # noqa: E402
 import zoom  # noqa: E402
 import judge_profile  # noqa: E402
+import context_setting  # noqa: E402
 import refresh_changed  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
@@ -928,11 +956,31 @@ def pointer_benched(health: dict, ptr: str, principal: str = ""):
 # the answer. The same rule applies to every query; route confidence, filenames
 # and complete-answer comparisons do not override it. Unfinished checks remain
 # explicit. Claim mode retains its separate support/contradiction judgment.
-CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 3500, 4
-READ_CHARS = CONFIRM_CHUNK * CONFIRM_CHUNKS_PER_FILE  # most text one file's check sends
+CONFIRM_CHUNK = 3500
+# Most text one file's check sends at the preset small: the profile's own number. Read from judge_profile, the file this
+# build ships, not through judges.profile(): scorecard.py loads two builds in one process and the second one is handed the
+# first one's judges package, whose profile may be an older build's.
+READ_CHARS = judge_profile.PROFILE.read_chars
 # A file this small is judged whole in one passage: split into pieces, a table or a list
 # spreads Jev's confidence across them and none reaches the bar. Same text sent either way.
 WHOLE_FILE_CHARS = 12000
+# The context preset this ask reads at (small, medium or large), where that choice came from (flag, env, settings or
+# default: context_setting.py), and the files re-sent at small after a read at a larger one failed. _main sets it once per
+# ask; small, the profile as written, until something sets it.
+_CONTEXT = {"name": judge_profile.SMALL, "source": "default", "small_paths": set()}
+
+def read_context(path=None) -> str:
+    """The preset one note's content check reads at: the ask's own, except small for a claim check (its shape was tuned
+    for a few passages) and for a file in _CONTEXT["small_paths"]. The one place that decides it: read_budget spends it,
+    and the check's input says it (a `context` key, only above small)."""
+    return judge_profile.SMALL if _CLAIM["text"] or path in _CONTEXT["small_paths"] else _CONTEXT["name"]
+
+def read_budget(path=None) -> int:
+    """The most characters of one note a content check reads: the preset's read_chars (judge_profiles.json), small's
+    READ_CHARS at small. pick_chunks spends it."""
+    name = read_context(path)
+    return READ_CHARS if name == judge_profile.SMALL else judge_profile.load(judge_profile.PROFILE.name, context=name).read_chars
+
 # Judge calibration (measured per judge): read from the profile, judge_profiles.json.
 CONFIRM_FLOOR = judges.profile().confirm_floor
 SOURCE_FLOOR = judges.profile().source_floor
@@ -1001,6 +1049,34 @@ def is_network_error(text, kind=None) -> bool:
     """A TypeSafe call that never got an answer (navigation-cli words it "could not reach TypeSafe (network)")."""
     return kind == "unreachable" or "(network)" in str(text or "")
 
+# The fallback to small (context setting 5/7). A read at medium or large can fail where small's would not: a call too big for the
+# judge, a long call that ran out of time, the long-input mode turned down. When a file's check fails at a bigger size and small
+# would have read less of that note, the file is planned again at small and sent again, once, in a run with no `context` key (so
+# no long-input header, small's ceilings and small's timeout). What that run answers is the file's answer, and the ask says so: the
+# CONTEXT line after the OUTCOME line, the `fallback` of --json's context, and the trace. A file that fits small is never sent
+# again for this, a re-send that fails leaves the first error as it was, and an ask at small runs none of it.
+FALLBACK_LINE = ("CONTEXT: {preset} did not work this time ({reason}), so this ask used Small. Small reads less of each note. "
+                 "Try again later, or pick Small yourself with --context small.")
+#: Why the read at the bigger size failed, as --json and the trace name it, and the words the line puts in the brackets.
+FALLBACK_WHY = {"slow": "the judge was slow to answer", "too-long": "the note was too long for the judge",
+                "turned-down": "the judge turned the request down", "unreachable": "the judge could not be reached",
+                "problem": "the judge had a problem"}
+
+def fallback_reason(error) -> str:
+    """Which of FALLBACK_WHY a content-check error is. The error row carries no kind, so this reads the words navigation-cli and
+    the judge's door print: a timeout; a network failure; a note over the judge's window (or cut to fit it); a refusal (any HTTP
+    4xx but 429, which is the judge asking to try later); anything else, retries used up included, is a problem."""
+    text = str(error or "")
+    if re.search(r"timed out|timeout", text, re.I):
+        return "slow"
+    if is_network_error(text):
+        return "unreachable"
+    if re.search(r"too (large|long|big)|never truncated|cut the input|context (length|window)|token limit|HTTP 413", text, re.I):
+        return "too-long"
+    if re.search(r"HTTP 4(?!29)\d\d", text):
+        return "turned-down"
+    return "problem"
+
 def navigation_command() -> list:
     repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
     return ["node", str(repo / "src" / "navigation-cli.ts")]
@@ -1028,14 +1104,86 @@ def file_score(best: float, none, passages: int, live: bool = False) -> float:
 def confirm_one(question: str, path: str):
     """(content score or None, whether the file was too long to read whole, error or None,
     note or None). note is HELD_SECRET (file not sent, not kept) or INCONCLUSIVE (the
-    check did not finish; the file is kept on its routing score)."""
+    check did not finish; the file is kept on its routing score). An error on a read at a bigger size that small
+    would have made smaller sends the file again at small (fall_back)."""
     done, ctx = confirm_start(question, path)
     if done:
         return done
-    return confirm_finish(question, ctx, *run_navigation(ctx["payload"]))
+    return fall_back(question, path, ctx, confirm_finish(question, ctx, *run_navigation(ctx["payload"])))
+
+def fall_back(question: str, path: str, ctx: dict, result):
+    """`result` (confirm_one's answer for this file), or the file read again at small: when `result` is an error from a read at
+    a bigger size that was more than small reads (ctx["wide"]), the file goes into small_paths, is planned again at small and is
+    sent once more, with no `context` key. What small answers replaces the error; if small fails too the first error stays and
+    the ask says nothing. The path stays in small_paths either way, so the later network and timeout re-checks read it at small
+    too; context_resent keeps the first error, and note_fallback names the reason from it once the file has an answer."""
+    if not (result[2] and ctx["wide"]):
+        return result
+    _CONTEXT["small_paths"].add(path)
+    _STAGE.setdefault("context_resent", {})[path] = result[2]
+    again = confirm_one(question, path)
+    return result if again[2] else again
+
+def fall_back_all(question: str, paths: list, started: list, results: list) -> None:
+    """fall_back for every file of a batched run whose check came back with an error, at most NAV_CONCURRENCY at once; the
+    answers go into `results` in place."""
+    wide = [i for i, (_, ctx) in enumerate(started) if ctx and ctx["wide"] and results[i][2]]
+    if not wide:
+        return
+    with ThreadPoolExecutor(max_workers=min(len(wide), NAV_CONCURRENCY)) as pool:
+        for i, r in zip(wide, pool.map(lambda i: fall_back(question, paths[i], started[i][1], results[i]), wide)):
+            results[i] = r
+
+def plan_at_small(paths: list, started: list, error) -> None:
+    """The batched run itself failed, and every file is checked on its own next. At a bigger size each is planned at small this
+    time (once; the file-by-file redo is the one retry), and a file whose read was more than small's is remembered, with the
+    run's error, as one the CONTEXT line may speak of."""
+    if _CONTEXT["name"] == judge_profile.SMALL:
+        return
+    _CONTEXT["small_paths"].update(paths)
+    for p, (_, ctx) in zip(paths, started):
+        if ctx and ctx["wide"]:
+            _STAGE.setdefault("context_resent", {})[p] = error or ""
+
+def note_fallback(paths: list, results: list) -> None:
+    """Record, for the CONTEXT line, --json and the trace, the files that were read again at small and ended with an answer
+    (no error left, whichever check gave it): how many, and why the first of them (in read order) had to be."""
+    resent = _STAGE.get("context_resent") or {}
+    worked = [p for p, r in zip(paths, results) if p in resent and not r[2]]
+    if worked:
+        _STAGE["context_fallback"] = {"files": len(worked), "reason": fallback_reason(resent[worked[0]])}
+
+_USE_LOCK = threading.Lock()  # the content checks run in threads
+
+def note_use(payload: dict, out) -> None:
+    """Count what a content-check run handed the judge, for the trace (`stages.context`), in an ask at a bigger size: the
+    characters of passage text in its payload (or in every payload of its batch), answered or not, and the judge requests and
+    long-input requests navigation-cli printed (`calls` and `longCalls`, which a batched run and a run of one file both print).
+    A run that failed outright prints nothing (a run of one file that errors dies with its message on stderr), so it counts for no
+    request, though a batched run counts the requests of a file whose row is an error. Best effort, like the rest of the trace: a
+    payload or an output of another shape counts for nothing and never fails the ask."""
+    if _CONTEXT["name"] == judge_profile.SMALL:
+        return
+    try:
+        items = payload.get("batch") or [payload]
+        chars = sum(len(n["description"]) for item in items for n in item["catalog"]["nodes"] if "sourceId" in n)
+    except (AttributeError, KeyError, TypeError):
+        chars = 0
+    said = out if isinstance(out, dict) else {}
+    with _USE_LOCK:
+        use = _STAGE.setdefault("context_used", {"requests": 0, "chars_sent": 0, "long_calls": 0})
+        use["chars_sent"] += chars
+        use["requests"] += said["calls"] if type(said.get("calls")) is int else 0
+        use["long_calls"] += said["longCalls"] if type(said.get("longCalls")) is int else 0
 
 def run_navigation(payload: dict):
     """(parsed navigation-cli output or None, error or None) for one payload or a batch."""
+    out, error = spawn_navigation(payload)
+    note_use(payload, out)
+    return out, error
+
+def spawn_navigation(payload: dict):
+    """One navigation-cli process for one payload or a batch: (its output, None), or (None, the error)."""
     try:
         r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
                            text=True, timeout=120)
@@ -1064,7 +1212,7 @@ def confirm_start(question: str, path: str):
     # One read rule: a file the zoom chose parts of is read as those parts, each with its line range, so the best
     # one carries a location; the whole file is not sent beside them. A chosen part is never cut: one longer than a
     # passage is split into passages the way a long file is, each with its own line range, and they are picked
-    # within READ_CHARS like a long file's. A file with no named parts (or read from the word search's list when the
+    # within the read budget like a long file's. A file with no named parts (or read from the word search's list when the
     # zoom failed) is read as before: whole when short, else the passages the word overlap picks.
     tparts, extra = part_passages(text.split("\n"), (_STAGE.get("toc_parts") or {}).get(path) or [])
     chunks = [] if tparts else [text] if len(text) <= WHOLE_FILE_CHARS else split_passages(text)
@@ -1077,7 +1225,12 @@ def confirm_start(question: str, path: str):
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
     base = len(chunks)
-    picked = ((pick_chunks(question, chunks) if chunks else []) + [base + i for i in (pick_chunks(question, extra) if extra else [])]
+    budget = read_budget(path)
+    # `wide`: this read is at a bigger size and its passages cost more than small's READ_CHARS, so small would read less of the
+    # note. Only such a read is sent back to small when it fails (fall_back); one small reads whole is not.
+    wide = read_context(path) != judge_profile.SMALL and any(sum(passage_costs(part)) > READ_CHARS for part in (chunks, extra))
+    picked = ((pick_chunks(question, chunks, budget) if chunks else [])
+              + [base + i for i in (pick_chunks(question, extra, budget) if extra else [])]
               + ([base + len(extra)] if outl else []))
     chunks = chunks + extra + ([outl["text"]] if outl else [])
     outline_i = base + len(extra) if outl else None
@@ -1096,10 +1249,12 @@ def confirm_start(question: str, path: str):
                                       "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
     if not _CLAIM["text"]:
         payload["mode"] = "source-evidence"
+    if (read_at := read_context(path)) != judge_profile.SMALL:  # navigation-cli reads the size from the check's own input
+        payload["context"] = read_at
     if payload_has_secret(payload):  # the question rides in the payload too
         return (None, partial, None, HELD_SECRET), None
-    return None, {"payload": payload, "text": text, "chunks": chunks, "picked": picked,
-                  "detail": detail, "partial": partial, "tparts": tparts, "base": base, "outline_i": outline_i}
+    return None, {"payload": payload, "text": text, "chunks": chunks, "picked": picked, "detail": detail, "partial": partial,
+                  "tparts": tparts, "base": base, "outline_i": outline_i, "wide": wide}
 
 TIE_MARGIN = 0.02  # candidate scores this close to the top are a tie
 
@@ -1676,16 +1831,19 @@ def with_subject(chunks: list, i: int) -> str:
     title = next((ln.strip() for ln in chunks[0].splitlines() if ln.strip()), "")[:SUBJECT_CHARS]
     return f"{title}{SUBJECT_SEP}{chunks[i]}" if title else chunks[i]
 
-def pick_chunks(question: str, chunks: list) -> list:
-    """Indexes to read, in file order: every passage if they fit in READ_CHARS, else
-    the passages scoring best by BM25 on the question's words (each word weighted by
-    how rare it is within this file; earlier passages win ties, so a file with few
-    matches is read from its top) until READ_CHARS is spent. Counting distinct words,
-    with the first chunk always read, spent the slots on the intro and on passages
-    full of the file's common words, missing the one section that answered."""
+def passage_costs(chunks: list) -> list:
+    """What each passage costs a read: its length, and the title's room on every one after the first (with_subject)."""
+    return [len(c) + (SUBJECT_CHARS + len(SUBJECT_SEP) if i else 0) for i, c in enumerate(chunks)]
+
+def pick_chunks(question: str, chunks: list, budget: int = READ_CHARS) -> list:
+    """Indexes to read, in file order: every passage if they fit in `budget` characters (read_budget(); small's
+    READ_CHARS when none is given), else the passages scoring best by BM25 on the question's words (each word
+    weighted by how rare it is within this file; earlier passages win ties, so a file with few matches is read
+    from its top) until the budget is spent. Counting distinct words, with the first chunk always read, spent the
+    slots on the intro and on passages full of the file's common words, missing the one section that answered."""
     # A passage after the first is sent led by the file's title (with_subject).
-    cost = [len(c) + (SUBJECT_CHARS + len(SUBJECT_SEP) if i else 0) for i, c in enumerate(chunks)]
-    if sum(cost) <= READ_CHARS:
+    cost = passage_costs(chunks)
+    if sum(cost) <= budget:
         return list(range(len(chunks)))
     terms = query_terms(question)
     tfs = []
@@ -1703,7 +1861,7 @@ def pick_chunks(question: str, chunks: list) -> list:
              for f, size in zip(tfs, sizes)]
     picked, used = [], 0
     for i in sorted(range(len(chunks)), key=lambda i: (-score[i], i)):
-        if used + cost[i] <= READ_CHARS:
+        if used + cost[i] <= budget:
             picked.append(i)
             used += cost[i]
         elif not score[i]:
@@ -2817,9 +2975,15 @@ def confirm(question: str, paths: list):
     """Check each path on its own, in one batched run. Returns ({path: score} for kept files,
     set of paths too long to read whole, first error or None, {path: note})."""
     paths = paths[:READ_MAX]
+    results = retry_network(question, paths, check_each(question, paths))
+    note_fallback(paths, results)
+    return confirm_results(paths, results)
+
+def check_each(question: str, paths: list) -> list:
+    """Each path's confirm_one answer: file by file, or with every file's check in one batched run (SUPERJEV_BATCH_JEV=0 keeps the
+    first). A file whose read at a bigger size failed has been sent again at small (fall_back) by the time this returns."""
     if not batch_jev():
-        results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
-        return confirm_results(paths, retry_network(question, paths, results))
+        return list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
     # Every file's check rides in one navigation-cli run: their Jev questions share
     # calls, split under the input ceiling, and each is still judged on its own.
     started = [confirm_start(question, p) for p in paths]
@@ -2828,11 +2992,13 @@ def confirm(question: str, paths: list):
     rows = rows.get("results") if isinstance(rows, dict) else None
     if ctxs and (error or not isinstance(rows, list) or len(rows) != len(ctxs)):
         # The batched run itself failed: check each file on its own instead of
-        # marking every file inconclusive.
-        results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
-        return confirm_results(paths, retry_network(question, paths, results))
+        # marking every file inconclusive. At a bigger size that check reads at small.
+        plan_at_small(paths, started, error)
+        return list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
     outs = iter(rows or [])
     results = [done or confirm_finish(question, ctx, next(outs), None) for done, ctx in started]
+    # A read at a bigger size that failed goes back to small, once, before the checks below, which then read it at small.
+    fall_back_all(question, paths, started, results)
     # The run's one shared call has one fixed timeout (SUPERJEV_NAV_TIMEOUT_MS) however
     # many files ride in it, so a busy moment can time out every file at once. A file
     # that timed out in a shared run is checked once more on its own, a small call, at most
@@ -2845,7 +3011,7 @@ def confirm(question: str, paths: list):
             results[i] = r
         if again:
             _STAGE["timeout_rechecks"] = len(again)
-    return confirm_results(paths, retry_network(question, paths, results))
+    return results
 
 def retry_network(question: str, paths: list, results: list) -> list:
     """A file whose content check hit a TypeSafe network error is checked once more on its own
@@ -3155,6 +3321,8 @@ def _lookup_once(question: str, principal: str, sdir: Path) -> int:
         traceback.print_exc()
     o = _RESULT if "outcome" in _RESULT else dict(outcome="error", why="the lookup ended without a result", cmd="")
     print(_outcome_line(o))
+    if line := fallback_line():  # the line after OUTCOME, once, when a read at a bigger size was read again at small
+        print(line)
     sys.stdout.write(buf.getvalue())
     return OUTCOME_EXIT[o["outcome"]]
 
@@ -3830,6 +3998,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                 else "claim evidence" if _CLAIM["text"] else "evidence-selected")} for s, p, ptr in top],
             "cut_after_top5": [p for _s, p, _ptr in merged[5:5 + STAGE_LIST_CAP]],
             **({"index": _STAGE["index"]} if "index" in _STAGE else {}),  # flag on: used, or why it fell back
+            **({"context": size} if (size := context_stage()) else {}),  # a bigger size: what it read and sent, and a fallback
         }
     except Exception as e:
         stages = {"error": type(e).__name__}
@@ -4860,6 +5029,7 @@ def connection_status(principal: str, as_json: bool = False) -> int:
     pointers = panel["pointers"]
     if not pointers:
         print(f"Nothing connected for {principal}.")
+        print(context_setting.status_line(_CONTEXT["name"], _CONTEXT.get("source", "default")))
         print(f"Next: follow {skill.parent / 'super-jev-connect' / 'SKILL.md'} to connect a folder.")
         _RESULT.update(next="connect", principal=principal, sets=[])
         return 0
@@ -4882,6 +5052,7 @@ def connection_status(principal: str, as_json: bool = False) -> int:
             print(f"  {name}: stale ({status})" + hint)
         else:
             print(f"  {name}: {status}")
+    print(context_setting.status_line(_CONTEXT["name"], _CONTEXT.get("source", "default")))
     print("Next: refresh stale sets with their listed instructions; inspect unknown/error sets before use. "
           "Ready sets can be searched with ask.py --principal " + principal + ' "question".')
     _RESULT.update(next="refresh" if any(r["state"] == "stale" for r in sets.values()) else "none",
@@ -5150,14 +5321,49 @@ def json_refusal(a: list) -> str:
         return "--json checks one statement at a time: use --claim STATEMENT once"
     return ""
 
-def run_json(principal: str, a: list) -> int:
+def context_status() -> dict:
+    """The size in use for --status: {preset, default, source}. default is the judge profile's own; source says where the
+    preset came from (flag, env, settings or default)."""
+    return {"preset": _CONTEXT["name"], "default": judge_profile.PROFILE.default_context, "source": _CONTEXT.get("source", "default")}
+
+def fallback_line() -> str:
+    """The CONTEXT line, when this ask's answer for a note came from a read at small after the read at the bigger size failed
+    (note_fallback), else ''."""
+    if not (fb := _STAGE.get("context_fallback")):
+        return ""
+    label = judge_profile.load(judge_profile.PROFILE.name, context=_CONTEXT["name"]).context_label
+    return FALLBACK_LINE.format(preset=label, reason=FALLBACK_WHY[fb["reason"]])
+
+def context_json():
+    """The `context` field of an ask's --json object, {preset, source}, or None: it is there only when the ask read at more
+    than small, so what a small ask prints is what it always printed. After a fallback it also holds `fallback`, {files, reason,
+    message}: how many notes were read again at small, why the first had to be, and the CONTEXT line itself."""
+    if _CONTEXT["name"] == judge_profile.SMALL:
+        return None
+    out = {"preset": _CONTEXT["name"], "source": _CONTEXT.get("source", "default")}
+    if fb := _STAGE.get("context_fallback"):
+        out["fallback"] = {**fb, "message": fallback_line()}
+    return out
+
+def context_stage():
+    """The trace's `stages.context`: the size, where it came from, the most of a note it reads, what the content checks sent and
+    used (`requests`, `chars_sent`, `long_calls`: the count a run at a bigger size is checked by) and, after a fallback,
+    `fallback` {files, reason}. None for an ask at small and for a claim, which leave the trace as it always was."""
+    if _CONTEXT["name"] == judge_profile.SMALL or _CLAIM["text"]:
+        return None
+    use = _STAGE.get("context_used") or {}
+    return {"preset": _CONTEXT["name"], "source": _CONTEXT.get("source", "default"), "budget_chars": read_budget(),
+            "requests": use.get("requests", 0), "chars_sent": use.get("chars_sent", 0), "long_calls": use.get("long_calls", 0),
+            **({"fallback": _STAGE["context_fallback"]} if _STAGE.get("context_fallback") else {})}
+
+def run_json(principal: str, a: list, context_flag=None) -> int:
     """--json: do the request exactly as text mode does, with its output held back, then print one
     JSON object from the same result (contract C1, v: 1) and return the same exit code."""
     _RESULT.clear()
     buf, crash = io.StringIO(), None
     try:
         with contextlib.redirect_stdout(buf):
-            rc = _dispatch(principal, a, as_json=True)
+            rc = _dispatch(principal, a, as_json=True, context_flag=context_flag)
     except SecretHeld as e:  # exits 1, as main() does in text mode
         rc, crash = 1, str(e)
     except Exception as e:  # any other crash is an error, exit 3 (text mode lets it fall out)
@@ -5165,7 +5371,7 @@ def run_json(principal: str, a: list) -> int:
         rc, crash = OUTCOME_EXIT["error"], _redact(f"{type(e).__name__}: {e}")
     lines = [crash] if crash else [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
     if a[:1] == ["--status"] and "sets" in _RESULT and not crash:
-        out = dict(_RESULT)
+        out = {**_RESULT, "context": context_status()}
     elif a[:1] in (["--approve"], ["--miss"]):  # done is the exit code; why is the reason recorded where it was decided
         out = {"done": rc == 0, "why": crash or _RESULT.get("why", ""), **({"removed": _RESULT["removed"]} if _RESULT.get("removed") else {})}
     else:
@@ -5176,16 +5382,50 @@ def run_json(principal: str, a: list) -> int:
         out = {k: v for k, v in _RESULT.items() if v and k != "cmd"}
         if out.get("files"):
             out["files"] = [{k: v for k, v in f.items() if k not in _FILE_PRIVATE} for f in out["files"]]
+        if a[:1] != ["--claim"] and (size := context_json()):  # a claim reads at small whatever was picked
+            out["context"] = size
     print(json.dumps({"v": 1, **out}))
     return rc
 
 def _main() -> int:
     principal, a = resolve_principal(sys.argv[1:])
+    _CONTEXT.update(name=judge_profile.SMALL, source="default", small_paths=set())  # one ask's size is its own
+    a, context_flag = context_setting.split_flag(a)  # before the --json check: `--context large --json -- q` is a JSON ask
     if a[:1] == ["--json"]:  # only a leading flag: after `--`, or inside a question, it is just words
-        return run_json(principal, a[1:])
-    return _dispatch(principal, a)
+        return run_json(principal, a[1:], context_flag)
+    return _dispatch(principal, a, context_flag=context_flag)
 
-def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
+def set_context(principal: str, a: list) -> int:
+    """`--set-context NAME`: save NAME as this principal's context (the key of settings.json in its state folder)."""
+    if len(a) != 1:
+        print(f"usage: --principal AGENT --set-context {'|'.join(context_setting.offered())}")
+        return 2
+    try:
+        name = context_setting.pick(a[0])
+    except ValueError as e:
+        print(f"ask: {e}")
+        return 2
+    try:
+        path = context_setting.save(state_dir(principal), name)
+    except OSError as e:
+        print(f"ask: could not save the context: {e.strerror or e}")
+        return OUTCOME_EXIT["error"]
+    print(f"Context for {principal} is now {judge_profile.load(judge_profile.PROFILE.name, context=name).context_label} "
+          f"(saved in {path}). --context or {context_setting.ENV} still wins for one ask.")
+    return 0
+
+def use_context(principal: str, flag) -> int:
+    """Set the size this ask reads at (flag, SUPERJEV_CONTEXT, the saved choice or the profile's default). 0, or 2 and one
+    line when the choice in use is not a size that can be picked."""
+    try:
+        name, source = context_setting.resolve(flag, state_dir(principal))
+    except ValueError as e:
+        print(f"ask: {e}")
+        return 2
+    _CONTEXT.update(name=name, source=source)
+    return 0
+
+def _dispatch(principal: str, a: list, as_json: bool = False, context_flag=None) -> int:
     if not sys.argv[1:] or sys.argv[1:] == ["--help"]:  # asking for the usage, not missing anything
         print(__doc__)
         return 2
@@ -5202,6 +5442,10 @@ def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
         return 2
     if as_json and (why := json_refusal(a)):
         print(why)
+        return 2
+    if a[0] == "--set-context":  # the one request that does not read the setting: it is how a bad one is mended
+        return set_context(principal, a[1:])
+    if use_context(principal, context_flag):
         return 2
     if a[0] == "--":  # the rest is the question, read literally (never a --flag)
         if len(a) == 1:

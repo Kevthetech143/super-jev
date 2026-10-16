@@ -29,7 +29,8 @@ folder count, up to date or not. `TYPESAFE_API_KEY` wins over the saved key.
 | `/right [n]` | the last answer was right: save it now (`n` is the note to put first, 1 to 5; default 1). A saved answer comes back at once, with no search. Right after a `/check` it says TRUE/FALSE results save themselves |
 | `/wrong` | the last answer was wrong. A saved answer is forgotten and the question is searched fresh at once; a live answer just won't be saved |
 | a folder or `.md` note (drag it in) | asks, then connects it or refreshes it |
-| `/status` | what is connected and whether it is current |
+| `/status` | what is connected and whether it is current, and the size a search reads at (below) |
+| `/context [name]` | how much of each note a search reads: `small` or `medium`, for the rest of this window (`large` is not offered yet). With no name it shows the one in use and where it came from |
 | `/help` or `?` | this list |
 | `/exit`, `exit`, `quit` or Ctrl+D | leave |
 
@@ -48,6 +49,33 @@ A paste is one question: it waits for Enter, and Esc or Ctrl+C throws it
 away. Up recalls it whole. A paste made during a search or connect is dropped.
 Needs a terminal with bracketed paste (the usual ones).
 
+## How much of each note is read
+
+A search checks the notes it picks by reading them, and a long note is read in
+passages: the ones that match your question best come first. The size sets how
+much of one note a search reads. A note that fits in that is read whole.
+
+| Size | Reads of each note | |
+|---|---|---|
+| Small (the default) | the best 14,000 characters | what Super Jev has always read; the fastest and cheapest |
+| Medium | up to 56,000 characters | up to 4 times more of each long note, using TypeSafe's experimental long-input mode on the longest reads |
+
+Large comes after its own test and is not offered yet: asking for it says so.
+
+`/context medium` sets it for the rest of the window (`/context` alone says which
+one is in use). The first of these that is set wins:
+
+1. `/context` in the window, or `--context NAME` on one `ask.py` call.
+2. `SUPERJEV_CONTEXT` in the shell. It is read only by `ask.py`, so no other
+   step (routing, the near-twin check) changes size.
+3. The choice saved for the principal with
+   `python3 skills/super-jev/ask.py --principal NAME --set-context NAME` (a
+   `context` key in `settings.json` in its state folder).
+4. Small.
+
+`/check` always reads at small. A size the judge does not state, a name that
+is not an offered size, or Large (not offered yet) is refused with one line (exit 2).
+
 ## One question from a shell
 
 `superjev <words>` handles the words as if typed in the window. The answer
@@ -58,6 +86,10 @@ exit code is the helper's own: found 0, not found 1, not supported 2, error
 cannot use (no such path, unknown command, or a first word shaped like an option such as `-x`,
 never a question) exits 2. No key: it says so, exit 4. Nothing connects
 without a keyboard.
+
+A question at another size: `SUPERJEV_CONTEXT=medium superjev "question"`. At the
+door `/context` alone shows the size in use; `/context medium` is for the window
+only, so it exits 2 and says so.
 
 Tests: `node --test test/jev-chat.test.ts` uses made-up notes and a stand-in
 `python3`, so it needs no key.

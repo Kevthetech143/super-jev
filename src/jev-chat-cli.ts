@@ -104,7 +104,7 @@ export async function run(io: IO): Promise<number> {
     if (res.stopped) return { data: null, code: 130, stopped: true, text: render({ kind: t.kind as any, data: {}, stopped: true }, look()) };
     let data: any = null;
     try { const j = JSON.parse(res.out); if (j && typeof j === 'object') data = j; } catch { /* not JSON */ }
-    const secs = t.kind === 'status' || t.kind === 'wrong' || t.kind === 'right' ? undefined : (Date.now() - t0) / 1000;
+    const secs = t.kind === 'status' || t.kind === 'context' || t.kind === 'wrong' || t.kind === 'right' ? undefined : (Date.now() - t0) / 1000;
     // a miss that failed (exit 2 or more) is an error whatever it printed; exit 1 only means there was no saved answer to remove
     if (!data || ((t.kind === 'wrong' || t.kind === 'right') && res.code > 1)) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: data?.why || lastLine(res.err) }, secs, noNext: t.kind === 'status' }, look()) };
     for (const s of data.sets ?? []) session.connected.add(s.name);
@@ -295,6 +295,16 @@ export async function run(io: IO): Promise<number> {
     }
     /** /right [n]: the engine saves the last answer's ranked list now. */
     async function right(t: Turn): Promise<string> { return noRating() || (await helper(t)).text; }
+    /** /context [name]: a name sets how much of each note a search reads for the rest of this window (nothing is sent; every helper call
+     *  after it carries the name); none asks the helper which size is in use. A name the judge profile states no size for is refused here,
+     *  so no ask is ever sent one the helper would refuse. */
+    async function context(t: Extract<Turn, { kind: 'context' }>): Promise<string> {
+      if (!t.name) return (await helper(t)).text;
+      try { loadJudgeProfile(profile.name, undefined, env, t.name); }
+      catch (e: any) { const why = String(e.message); return why.charAt(0).toUpperCase() + why.slice(1) + '.'; }
+      session.context = t.name;
+      return render({ kind: 'context', data: { context: { preset: t.name, source: 'flag' } } }, look());
+    }
     try {
       for (let line = await term.next(); line !== null; line = await term.next()) {
         const t = readLine(line, home);
@@ -307,6 +317,7 @@ export async function run(io: IO): Promise<number> {
         else if (t.kind === 'ask' || t.kind === 'check') { afterCheck = t.kind === 'check'; if (t.kind === 'ask') session.last = t.text; text = await answer(t); }
         else if (t.kind === 'wrong') text = await wrong();
         else if (t.kind === 'right') text = await right(t);
+        else if (t.kind === 'context') text = await context(t);
         else if (t.kind !== 'empty') text = (await helper(t)).text;
         if (text) stdout.write(text + '\n\n');
       }
@@ -323,6 +334,7 @@ export async function run(io: IO): Promise<number> {
     if (t.kind === 'say') { stderr.write(t.text + '\n'); return 2; }
     if (t.kind === 'wrong' || t.kind === 'right') { stderr.write(NO_QUESTION + '\n'); return 2; } // a one-shot line has no earlier question
     if (t.kind === 'empty') { stderr.write('Usage: superjev "your question"\n'); return 2; }
+    if (t.kind === 'context' && t.name) { stderr.write('/context only works in the window. For one question, set SUPERJEV_CONTEXT in your shell.\n'); return 2; }
     if (askedKey(t)) { stderr.write(noKey + '\n'); return 4; }
     if (t.kind === 'connect') {
       let r: Reply;

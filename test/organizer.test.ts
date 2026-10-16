@@ -56,7 +56,7 @@ test('CLI live response contract preserves metadata, groups and review with mock
   const mock = 'data:text/javascript,' + encodeURIComponent(`
     globalThis.fetch = async (url, init) => {
       const request = JSON.parse(init.body);
-      if (url !== 'https://api.typesafe.ai/v1/systemone' || request.model !== 'jev-latest' || Object.keys(request.questions).length !== 4) throw new Error('Unexpected request');
+      if (url !== 'https://api.typesafe.ai/v1/systemone' || request.model !== 'jev-1.13.0' || Object.keys(request.questions).length !== 4) throw new Error('Unexpected request');
       return new Response(JSON.stringify(${JSON.stringify(response)}));
     };
   `);
