@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadJudgeProfile } from './judge-profile.ts';
+import { frontDoor, isFrontDoor } from './front-door.ts';
 import {
   COMMANDS, HELP, OPEN, USAGE, childEnv, confirmText, fixOf, helperCall, keyAction, launchLine, pack, pointerName, prose, readLine, render,
   type Session, type Turn,
@@ -32,6 +33,7 @@ const lastLine = (s: string) => s.trim().split('\n').pop()?.trim() ?? '';
 
 export async function run(io: IO): Promise<number> {
   const { argv, env, stdin, stdout, stderr } = io;
+  if (isFrontDoor(argv)) return frontDoor({ argv, env, skillDir: SKILL, out: (t) => stdout.write(t + '\n'), err: (t) => stderr.write(t + '\n') });
   const home = env.HOME || homedir();
   const profile = loadJudgeProfile(undefined, undefined, env);
   const { keyEnv, vendor } = profile;
