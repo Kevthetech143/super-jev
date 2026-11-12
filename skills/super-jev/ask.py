@@ -4396,6 +4396,22 @@ def source_row(principal: str, pointer: str, path: str):
         offset = listed["nextOffset"]
     return (rows[0] if rows else None), "ok"
 
+def source_row_in_family(principal: str, pointer: str, path: str):
+    """(row, status, owning pointer). A lookup names a split set by its base (<base>), but the file may live in a
+    part (<base>-N): when the named pointer has no row for path, look in its siblings and return the real owner."""
+    row, status = source_row(principal, pointer, path)
+    if row or status != "ok":
+        return row, status, pointer
+    base, _, n = pointer.rpartition("-")
+    base = base if base and n.isdigit() else pointer
+    names = [p.get("pointer") if isinstance(p, dict) else p for p in memory({"action": "panel", "principal": principal}).get("pointers", [])]
+    for sib in sorted((x for x in names if isinstance(x, str) and x != pointer and x.rpartition("-")[0] == base and x.rpartition("-")[2].isdigit()),
+                      key=lambda x: int(x.rpartition("-")[2])) + ([base] if base != pointer and base in names else []):
+        r, st = source_row(principal, sib, path)
+        if r:
+            return r, "ok", sib
+    return None, "ok", pointer
+
 def live_sha(path: str) -> str:
     """sha256 of the file as it is now."""
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -4556,7 +4572,7 @@ def save_answer(principal: str, question: str, answer: str, sdir: Path,
     why = secret_why(text, key, answer)
     if why:
         return not_saved(sdir, key, why)
-    row, status = source_row(principal, pointer, evidence_file)
+    row, status, pointer = source_row_in_family(principal, pointer, evidence_file)
     if status != "ok":
         return not_saved(sdir, key, f"stale: pointer {pointer} is {status}")
     if not row or row.get("contentSHA") != live_sha(evidence_file):
@@ -4862,7 +4878,7 @@ def approve(principal: str, question: str, answer, sdir: Path, rank=None, file=N
         if why:
             return not_saved(sdir, norm_q(question), why)
         for f in files[1:]:
-            r, st = source_row(principal, f["pointer"], f["path"])
+            r, st, _own = source_row_in_family(principal, f["pointer"], f["path"])
             if st != "ok" or not r or r.get("contentSHA") != f["sha"]:
                 return not_saved(sdir, norm_q(question), f"stale: {f['path']} changed since connect")
         win = rec.get("win") or {}
