@@ -93,7 +93,7 @@ def test_inventory_skips_hidden_backup_and_vault_dirs_and_holds_password_and_ove
 
     monkeypatch.setattr(pb, "CEILING_BYTES", 50)
 
-    files, held = pb.inventory([root])
+    files, held = pb.inventory([root], split_big=False)  # a big .md is split by connect_sections
 
     assert {p.name for p in files} == {"normal.md"}
     held_by_name = {Path(p).name: why for p, why in held}

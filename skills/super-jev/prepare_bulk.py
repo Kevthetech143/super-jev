@@ -64,7 +64,9 @@ Pipeline per run:
      connects) except hidden ones: a hidden file, or anything in a hidden folder such as .git/, is system
      clutter and is not counted. Files your own flags leave out (--exclude, --name, --no-recurse) are not
      counted. SKIP lines never change which files connect or the exit code. Files matching
-     card/password-like patterns or over the size ceiling (250,000 bytes; a bigger note is held "too big, split it", never connected in sections) are HELD and never sent to the writer; a
+     card/password-like patterns are HELD and never sent to the writer. A Markdown note over the size ceiling (250,000 bytes) is
+     connected by sections instead (sections.py: split along its own headings, else at blank lines; each section file names its
+     file, heading path and original line range; the original is never written); another file over it is held "too big, split it"; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
      The card-number check ignores ISO dates, URLs and uuids first (a long numeric id in a URL, a uuid, or a run of
@@ -163,6 +165,7 @@ def given_path(value) -> Path:
 sys.path.insert(0, str(HERE))
 from connect_checked import KNOWN_VERDICTS, PaymentRequired, gate, gate_many, memory, watched_refusals  # noqa: E402
 import watched  # noqa: E402
+import sections  # noqa: E402
 from watched import read_report_file, report_principals  # noqa: E402
 from judge_profile import PROFILE as JUDGE_PROFILE  # noqa: E402
 
@@ -1035,7 +1038,7 @@ def print_skips(rows: list) -> None:
 
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
-              names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS):
+              names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS, split_big: bool = True):
     """Union of Markdown files under `roots`, in root order then sorted-per-root order. Each file is counted once
     even if reachable through more than one root. A file the secret scan holds, or one over CEILING_BYTES
     ("too big, split it"), is listed in `held` and never connected: there is no override.
@@ -1115,7 +1118,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
                 skip(rp, "empty")
                 continue
             seen.add(rp)
-            if len(b) > CEILING_BYTES:
+            # A Markdown note over the ceiling is connected by sections (sections.py), never held for size.
+            if len(b) > CEILING_BYTES and not (split_big and p.suffix.lower() == ".md"):
                 held.append((str(p), f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,}); "
                                      "too big, split it into smaller "
                                      + ("files" if tuple(extensions) != CONNECTABLE_EXTENSIONS
@@ -1142,6 +1146,33 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
     _RESULT["skipped"] = skip_rows(skips, extensions)
     print_skips(_RESULT["skipped"])
     return files, held
+
+
+def connect_sections(a, files: list, held: list) -> tuple:
+    """Connect by sections: each Markdown file that splits along its own headings (sections.py) is replaced in
+    the connect set by its section files; a.sectioned records origin -> {sha256, parts}. With sections off
+    (a recipe from before sections) only a note over the size ceiling is split. Originals are never written."""
+    a.sectioned, out = {}, []
+    for p in files:
+        p = Path(p)
+        if p.suffix.lower() != ".md":
+            out.append(p); continue
+        b = p.read_bytes()
+        big = len(b) > CEILING_BYTES
+        if not (a.sections or big):
+            out.append(p); continue
+        parts = sections.write_sections(p.absolute() if not p.is_absolute() else p, b.decode("utf-8"), CACHE_DIR,
+                                        a.pointer, ceiling=CEILING_BYTES)
+        if not parts:
+            if big:  # cannot happen with a positive ceiling; never connect an over-ceiling file whole
+                held.append((str(p), f"over size ceiling ({len(b):,} bytes) and could not be split")); continue
+            out.append(p); continue
+        a.sectioned[str(p)] = {"sha256": hashlib.sha256(b).hexdigest(), "parts": [str(s) for s, _ in parts]}
+        out += [s for s, _ in parts]
+    if a.sectioned:
+        n = sum(len(v["parts"]) for v in a.sectioned.values())
+        print(f"sections: {len(a.sectioned)} file(s) connected as {n} sections (originals unchanged)")
+    return out, held
 
 
 def secret_detail(p: Path):
@@ -1573,6 +1604,8 @@ def replay_recipe(a) -> None:
     a.no_recurse = a.no_recurse or (not new_roots and bool(rep.get("noRecurse")))
     a.names = a.names or rep.get("names") or []
     a.allow_targets = a.allow_targets or rep.get("allowTargets") or []
+    if getattr(a, "sections", None) is None:
+        a.sections = rep.get("sections") is True  # a recipe from before sections keeps connecting files whole
     if a.limit is None and isinstance(rep.get("limit"), int):
         a.limit = rep["limit"]
     # The writer is one choice: give any of --writer, --writer-model, --writer-command and the recorded
@@ -1975,6 +2008,10 @@ def main() -> int:
                          "or an absolute path, and keep keys out of it (it is stored in prepare-cache/ and shown in the "
                          "banner). Falls back to the SUPERJEV_WRITER_COMMAND env var when omitted; the env var is not recorded")
     ap.add_argument("--no-connect", action="store_true")
+    ap.add_argument("--sections", dest="sections", action="store_true", default=None,
+                    help="opt in: connect every Markdown file over 6,000 characters by its own headings, one searchable unit per section (recorded for --refresh)")
+    ap.add_argument("--no-sections", dest="sections", action="store_false",
+                    help="the default: connect files whole; a note over the size ceiling is still split by sections")
     ap.add_argument("--json", action="store_true",
                     help="print one JSON object (v 1: connected, held, failed, skipped, refused) instead of text; "
                          "same run, same exit code; a connect only")
@@ -2062,6 +2099,8 @@ def run(a) -> int:
         a.extensions = list(CONNECTABLE_EXTENSIONS)
     if a.limit is None:
         a.limit = 50
+    if getattr(a, "sections", None) is None:
+        a.sections = False  # opt-in; a note over the size ceiling is split by sections either way
     # What was chosen about the writer (given, or replayed) goes in the report; the defaults are applied
     # after, so they are never recorded and can still change. The env var is never recorded either.
     writer_recipe = {k: v for k, v in (("writer", a.writer), ("writerModel", a.writer_model),
@@ -2179,6 +2218,7 @@ def run(a) -> int:
                   "them out may still apply. Reconnect with --root (not --refresh) to rescope.")
         files = [p for p in files if str(p) in scope]
         held = [(p, why) for p, why in held if str(p) in scope]
+    files, held = connect_sections(a, files, held)
     _RESULT["held"] = held
     if getattr(a, "watched", False):
         for folder, n in sorted((_RESULT.get("vault") or {}).items()):
@@ -2447,6 +2487,8 @@ def run(a) -> int:
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
 
               "approved": [str(p) for p in connect_set],
+              "sections": bool(a.sections),
+              **({"sectioned": a.sectioned} if getattr(a, "sectioned", None) else {}),
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               # the sha each judge-held file had when judged: an ask tells an edited one without opening this cache
               "heldSha": {f: e["sha256"] for f, e in cache.items() if isinstance(e, dict) and e.get("pass") is False

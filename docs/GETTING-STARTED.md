@@ -144,7 +144,7 @@ for `--writer builtin`). Pick the description writer:
   per file) but applies with `--writer builtin` too. A `--refresh` guards only the files
   that changed.
 - **Held files:** Connect ends with `CONNECTED n, HELD m, FAILED k` and exits 3 if any file was held. A held
-  file (a secret-like value, or a note over 250,000 bytes) has no override: read the held list the command
+  file (a secret-like value, or a non-Markdown file over 250,000 bytes; a bigger Markdown note is connected by sections instead) has no override: read the held list the command
   printed, then remove or move the value, or split the note, and re-run. A password or key keyword holds a
   file only when a literal value follows it (a digit or symbol in it, not a placeholder or a call).
 - **Where state lives:** per-principal logs and the memory config under `$SUPERJEV_STATE_DIR` or

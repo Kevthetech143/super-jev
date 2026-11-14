@@ -230,6 +230,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import prepare_bulk  # noqa: E402
+import sections  # noqa: E402  (connect by sections: a section file names its original)
 from prepare_bulk import (KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret,  # noqa: E402
                           payload_has_secret, path_has_secret, redact_path_secrets, clean_text)
 import auto_heal  # noqa: E402
@@ -735,6 +736,11 @@ def file_row(score, path: str, pointer: str, tier: str) -> dict:
         row["line"] = n
         if text := line_text(path, n):
             row["text"] = text
+    if sec := sections.origin_of(path):  # a section file (connect by sections): name the original and its lines
+        lo, hi = sec["lines"]
+        if (loc or {}).get("unit") == "lines":
+            lo, hi = sections.origin_lines(sec, loc["start"], loc["end"])
+        row["section"] = {"file": sec["file"], "heading": sec["heading"], "lines": [lo, hi]}
     return row
 
 
@@ -743,7 +749,12 @@ def show_file(f: dict) -> None:
     score = f"{f['score']:5.2f}" if isinstance(f.get("score"), (int, float)) else "saved"
     loc = f.get("location") or {}
     where = f"{f['path']}:{loc['start']}-{loc['end']}" if loc.get("unit") == "lines" else f['path']
+    sec = f.get("section")
+    if sec:
+        where = f"{sec['file']}:{sec['lines'][0]}-{sec['lines'][1]}"
     print(f"{score}  {where}  [{f['pointer']}]{note}")
+    if sec:
+        print(f"       section: {sec['heading']} (section file {f['path']})")
     if f.get("no_span"):
         print(f"       {f['no_span']}")
 

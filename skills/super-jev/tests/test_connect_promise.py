@@ -1,5 +1,5 @@
-"""The connect promise, offline: Markdown by default (code files only with --ext), notes up to 250,000 bytes connect whole, bigger ones are held
-"too big, split it", and every run ends with CONNECTED/HELD/FAILED counts and an exit code that matches
+"""The connect promise, offline: Markdown by default (code files only with --ext), notes up to 250,000 bytes pass the
+size rule, bigger Markdown notes are split by sections instead of held (a bigger code file is still held "too big, split it"), and every run ends with CONNECTED/HELD/FAILED counts and an exit code that matches
 (0 all connected, 3 something held, 1 something failed)."""
 import importlib.util
 import json
@@ -43,13 +43,14 @@ def go(tmp_path, monkeypatch, capsys):
     return run
 
 
-def test_note_of_exactly_250000_bytes_connects_whole_and_one_byte_more_is_held(tmp_path):
+def test_note_of_exactly_250000_bytes_passes_whole_and_one_byte_more_is_split_not_held(tmp_path):
     root = _folder(tmp_path)
     (root / "exact.md").write_text("a" * 250_000)
     (root / "over.md").write_text("a" * 250_001)
-    files, held = pb.inventory([root])
-    assert [p.name for p in files] == ["exact.md"]
-    assert len(held) == 1 and held[0][0].endswith("over.md")
+    (root / "over.py").write_text("a" * 250_001)
+    files, held = pb.inventory([root], extensions=(".md", ".py"))
+    assert sorted(p.name for p in files) == ["exact.md", "over.md"]  # over.md connects by sections (connect_sections)
+    assert len(held) == 1 and held[0][0].endswith("over.py")
     assert "too big, split it" in held[0][1] and "250,001 bytes" in held[0][1]
 
 
@@ -81,14 +82,14 @@ def test_all_connected_ends_with_counts_and_exits_0(tmp_path, go):
     assert out.strip().splitlines()[-1].startswith("CONNECTED 2, HELD 0, FAILED 0")
 
 
-def test_a_held_file_exits_3_and_the_counts_line_is_last(tmp_path, go):
+def test_an_over_ceiling_note_connects_by_sections_and_exits_0(tmp_path, go):
     root = _folder(tmp_path, **{"a.md": "alpha\n"})
-    (root / "big.md").write_text("a" * 250_001)
+    (root / "big.md").write_text(("word " * 15 + "\n\n") * 4000)
     code, out = go(root)
-    assert code == 3
+    assert code == 0
     last = out.strip().splitlines()[-1]
-    assert COUNTS.match(last) and last.startswith("CONNECTED 1, HELD 1, FAILED 0")
-    assert "too big, split it" in out
+    assert COUNTS.match(last) and last.startswith("CONNECTED ") and "HELD 0, FAILED 0" in last
+    assert "too big" not in out and "connected as" in out
 
 
 def test_a_secret_held_file_exits_3(tmp_path, go):
