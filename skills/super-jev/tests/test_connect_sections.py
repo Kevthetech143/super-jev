@@ -82,7 +82,8 @@ def test_write_sections_header_labels_and_original_untouched(tmp_path):
     head = first.read_text().splitlines()
     assert head[0] == "# garden.md > Garden log > Tomatoes > Planting"
     assert head[1].startswith(f"(Section of {src}, lines 1-")
-    assert sections.origin_of(first) == {"file": str(src), "lines": meta["lines"]}
+    assert sections.origin_of(first) == {"file": str(src), "heading": "Garden log > Tomatoes > Planting", "lines": meta["lines"]}
+    assert sections.origin_lines(sections.origin_of(first), 4, 5) == (1, 2)
     lab = json.loads(first.with_suffix(".labels.json").read_text())
     assert lab["file"] == str(src) and lab["labels"]
     assert all(meta["lines"][0] <= r["line"] <= meta["lines"][1] for r in lab["labels"])
