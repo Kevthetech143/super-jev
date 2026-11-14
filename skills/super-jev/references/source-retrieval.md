@@ -10,7 +10,8 @@ note is cut into passages of about 3,500 characters, and one check reads as many
 as the context size allows: every passage when they all fit, otherwise the passages that
 match the question's words best, best first, until the size is spent. Small, the
 default, reads up to 14,000 characters of one note and Medium 56,000. Large comes after
-its own test and is not offered yet. A note over 250 KB is outside the contract. Reading
+its own test and is not offered yet. A note over 250 KB is connected as section files (split along
+its own headings, else at blank lines), each read like a note; a hit names the original file and lines. Reading
 selected sections has additional recall limits.
 
 The context size is picked with `--context NAME` on one ask, `SUPERJEV_CONTEXT` in the

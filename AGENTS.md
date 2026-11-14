@@ -82,8 +82,8 @@ unless you add `--findability`.
 
    Read the last line and the exit code, never just the word "registered":
 
-   - Exit 3: connected, but some files were held (a secret-like value, or a note
-     over 250,000 bytes). Read the `HELD` lines; those files are not searchable.
+   - Exit 3: connected, but some files were held (a secret-like value, or a non-Markdown
+     file over 250,000 bytes; a bigger Markdown note is connected by sections). Read the `HELD` lines; those files are not searchable.
    - Exit 1: a file failed its check or the run could not finish. Read the
      `EXCEPTION` and `ERROR` lines. Other files may still have connected: read
      `CONNECTED n` on the last line.

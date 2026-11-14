@@ -64,7 +64,9 @@ Pipeline per run:
      connects) except hidden ones: a hidden file, or anything in a hidden folder such as .git/, is system
      clutter and is not counted. Files your own flags leave out (--exclude, --name, --no-recurse) are not
      counted. SKIP lines never change which files connect or the exit code. Files matching
-     card/password-like patterns or over the size ceiling (250,000 bytes; a bigger note is held "too big, split it", never connected in sections) are HELD and never sent to the writer; a
+     card/password-like patterns are HELD and never sent to the writer. A Markdown note over the size ceiling (250,000 bytes) is
+     connected by sections instead (sections.py: split along its own headings, else at blank lines; each section file names its
+     file, heading path and original line range; the original is never written); another file over it is held "too big, split it"; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
      The card-number check ignores ISO dates, URLs and uuids first (a long numeric id in a URL, a uuid, or a run of
@@ -2007,9 +2009,9 @@ def main() -> int:
                          "banner). Falls back to the SUPERJEV_WRITER_COMMAND env var when omitted; the env var is not recorded")
     ap.add_argument("--no-connect", action="store_true")
     ap.add_argument("--sections", dest="sections", action="store_true", default=None,
-                    help="connect each Markdown file by its own headings, one searchable unit per section (default for a new connect)")
+                    help="opt in: connect every Markdown file over 6,000 characters by its own headings, one searchable unit per section (recorded for --refresh)")
     ap.add_argument("--no-sections", dest="sections", action="store_false",
-                    help="connect files whole (a note over the size ceiling is still split by sections)")
+                    help="the default: connect files whole; a note over the size ceiling is still split by sections")
     ap.add_argument("--json", action="store_true",
                     help="print one JSON object (v 1: connected, held, failed, skipped, refused) instead of text; "
                          "same run, same exit code; a connect only")
@@ -2098,7 +2100,7 @@ def run(a) -> int:
     if a.limit is None:
         a.limit = 50
     if getattr(a, "sections", None) is None:
-        a.sections = True
+        a.sections = False  # opt-in; a note over the size ceiling is split by sections either way
     # What was chosen about the writer (given, or replayed) goes in the report; the defaults are applied
     # after, so they are never recorded and can still change. The env var is never recorded either.
     writer_recipe = {k: v for k, v in (("writer", a.writer), ("writerModel", a.writer_model),

@@ -116,14 +116,14 @@ def go(tmp_path, monkeypatch, capsys):
     return run
 
 
-def test_connect_sends_sections_and_records_the_originals(tmp_path, go):
+def test_opt_in_sections_sends_sections_and_records_the_originals(tmp_path, go):
     root = tmp_path / "notes"
     root.mkdir()
     (root / "garden.md").write_text(long_note())
     (root / "plain.md").write_text("no headings at all, one short line\n")
     (root / "huge.md").write_text(("word " * 15 + "\n\n") * 4000)  # over 250,000 bytes: split, not held
     shas = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir()}
-    code, out, sent = go(root)
+    code, out, sent = go(root, "--sections")
     assert code == 0, out
     assert "too big" not in out and "HELD 0" in out
     assert str(root / "plain.md") in sent
@@ -142,14 +142,28 @@ def test_connect_sends_sections_and_records_the_originals(tmp_path, go):
     assert rc.changed_files(rep, cache) == [str(root / "garden.md")]
 
 
-def test_no_sections_keeps_files_whole_but_still_splits_an_over_ceiling_note(tmp_path, go):
+@pytest.mark.parametrize("flag", [[], ["--no-sections"]])
+def test_by_default_only_an_over_ceiling_note_is_split(tmp_path, go, flag):
     root = tmp_path / "notes"
     root.mkdir()
     (root / "garden.md").write_text(long_note())
     (root / "huge.md").write_text(("word " * 15 + "\n\n") * 4000)
-    code, out, sent = go(root, "--no-sections")
+    code, out, sent = go(root, *flag)
     assert code == 0, out
     assert str(root / "garden.md") in sent and not any("/sections/p/garden-" in s for s in sent)
-    assert any("/sections/p/huge-" in s for s in sent)
+    assert str(root / "huge.md") not in sent and sum("/sections/p/huge-" in s for s in sent) > 1
     rep = json.loads((tmp_path / "cache" / "p-report.json").read_text())
-    assert rep["sections"] is False
+    assert rep["sections"] is False and set(rep["sectioned"]) == {str(root / "huge.md")}
+    # the split file's sections carry their own line labels
+    part = Path(rep["sectioned"][str(root / "huge.md")]["parts"][0])
+    assert json.loads(part.with_suffix(".labels.json").read_text())["file"] == str(root / "huge.md")
+
+
+def test_a_refresh_replays_the_opt_in(tmp_path, go):
+    root = tmp_path / "notes"
+    root.mkdir()
+    (root / "garden.md").write_text(long_note())
+    go(root, "--sections")
+    code, out, sent = go(root, "--refresh")
+    assert code == 0, out
+    assert sum("/sections/p/garden-" in s for s in sent) == 9
