@@ -41,6 +41,11 @@ def changed_files(report: dict, cache: dict) -> list[str]:
         p, entry = Path(f), cache.get(f) or {}
         if not p.is_file() or sha(p) != entry.get("sha256"):
             out.append(f)
+    # A file connected by sections: its section files never change on their own, so the original is compared.
+    for f, entry in (report.get("sectioned") or {}).items():
+        p = Path(f)
+        if isinstance(entry, dict) and (not p.is_file() or sha(p) != entry.get("sha256")) and f not in out:
+            out.append(f)
     return out + [f for f in held_changed(report, cache) if f not in out]
 
 
@@ -70,6 +75,7 @@ def known_files(report: dict) -> set[str]:
     """Every file a report already accounts for (connected, failed, held or removed)."""
     known = {str(e[0] if isinstance(e, list) else e)
              for k in ("approved", "exceptions", "held", "removed") for e in report.get(k) or []}
+    known |= set(report.get("sectioned") or {})  # a file connected by sections is known by its own path
     return known | {os.path.realpath(k) for k in known}
 
 
