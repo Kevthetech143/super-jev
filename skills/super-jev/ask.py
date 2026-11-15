@@ -747,7 +747,7 @@ def show_file(f: dict) -> None:
     where = f"{f['path']}:{loc['start']}-{loc['end']}" if loc.get("unit") == "lines" else f['path']
     print(f"{score}  {where}  [{f['pointer']}]{note}")
     if f.get("section"):
-        print(f"       section: {f['path']} > {f['section']}")
+        print(f"       section: {f['section']}")
     if f.get("no_span"):
         print(f"       {f['no_span']}")
 
