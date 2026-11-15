@@ -730,6 +730,8 @@ def file_row(score, path: str, pointer: str, tier: str) -> dict:
         row["location"] = loc
     elif why := ((_STAGE.get("checks") or {}).get(path) or {}).get("no_span"):
         row["no_span"] = why
+    if _STAGE.get("word_question") and (sec := matched_section(path, _STAGE["word_question"], living_record(path))):
+        row["section"] = sec  # the headed section that matched: callers read "file > section" instead of guessing
     n = ((_STAGE.get("checks") or {}).get(path) or {}).get("best_line")
     if isinstance(n, int) and n > 0:
         row["line"] = n
@@ -744,6 +746,8 @@ def show_file(f: dict) -> None:
     loc = f.get("location") or {}
     where = f"{f['path']}:{loc['start']}-{loc['end']}" if loc.get("unit") == "lines" else f['path']
     print(f"{score}  {where}  [{f['pointer']}]{note}")
+    if f.get("section"):
+        print(f"       section: {f['path']} > {f['section']}")
     if f.get("no_span"):
         print(f"       {f['no_span']}")
 
@@ -2095,6 +2099,109 @@ def refresh_would_admit(path: str, ptr: str) -> bool:
     return not any(x.casefold() in prepare_bulk.SKIP_PARTS or x.startswith(".") for x in rp.relative_to(base).parts)
 
 PHRASE_WEIGHT = 0.7
+# A question word in the file's own name or folder ("medications/current.md") says what the file is about: in the
+# passage scores those words saturate (every file of a set shares them). It adds its idf once, beside the best passage.
+NAME_WEIGHT = 1.0
+MONTHS = {m: i + 1 for i, m in enumerate(("january", "february", "march", "april", "may", "june", "july", "august",
+                                          "september", "october", "november", "december"))}
+MONTHS.update({m[:3]: i for m, i in list(MONTHS.items())})
+
+def path_words(parts) -> list:
+    return words(" ".join(parts).replace("-", " ").replace("_", " "))
+
+def plural_forms(t: str) -> set:
+    """A word and its plain singular/plural forms: venture/ventures, tax/taxes."""
+    return {t, t + "s", t + "es", t[:-1] if t.endswith("s") else t, t[:-2] if t.endswith("es") else t}
+
+# "may" is the month only right before a day number and not after a word that makes it the verb ("how may", "it may").
+NOT_A_MONTH_BEFORE = {"will", "can", "could", "would", "should", "might", "must", "how", "what", "who", "which", "why",
+                      "where", "when", "i", "you", "we", "they", "he", "she", "it", "that", "this", "there", "one"}
+
+def kind_stem(t: str) -> str:
+    """The front of a question word that names a living record's kind by its folder or name: a long word by its
+    first five letters ("medicines" ~ "medications"), a short plural by its singular ("meds" ~ "medications").
+    '' when the word is too short to say."""
+    if len(t) > 5:
+        return t[:5]
+    return t[:-1] if len(t) == 4 and t.endswith("s") and t[-2] != "s" else ""
+
+_LIVING: dict = {}
+
+def living_record(path: str) -> bool:
+    """A living record: a file kept as the one current list of its kind. Its header (first lines) has an
+    "Entry rule:" line, it has exactly one "## Current" section and a "## Change log" section. Structural only."""
+    if path not in _LIVING:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read(200_000)
+        except OSError:
+            text = ""
+        lines = text.splitlines()
+        heads = [ln.strip().casefold() for ln in lines if ln.startswith("## ")]
+        _LIVING[path] = (any(ln.startswith("Entry rule:") for ln in lines[:12])
+                         and sum(h.startswith("## current") for h in heads) == 1
+                         and any(h.startswith(("## change log", "## changelog")) for h in heads))
+    return _LIVING[path]
+
+def matched_section(path: str, question: str, living: bool = False):
+    """The "## " heading of the file's section that best matches the question's words (a living record asked
+    for by its kind: its Current list). None when the file has no headed sections or no section matches."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(400_000)
+    except OSError:
+        return None
+    secs, title, body = [], None, []
+    for ln in text.splitlines():
+        if ln.startswith("## "):
+            if title is not None:
+                secs.append((title, " ".join(body)))
+            title, body = ln[3:].strip(), []
+        elif title is not None:
+            body.append(ln)
+    if title is not None:
+        secs.append((title, " ".join(body)))
+    if not secs:
+        return None
+    in_path = set(path_words(Path(path).parts))  # a word the path already holds (the person, the folder) tells no section apart
+    terms = [t[:5] for t in query_terms(question) if not plural_forms(t) & in_path]
+    def hits(t, b):
+        ws = words(t + " " + t + " " + b)  # the heading counts twice
+        return sum(1 for q in terms if any(w.startswith(q) for w in ws)), sum(w.startswith(tuple(terms)) for w in ws)
+    if living:  # its Current list is the record's state, unless the question names another heading ("change log")
+        named = [t for t, _ in secs if any(w.startswith(q) for q in terms for w in words(t))]
+        return named[0] if named else next((t for t, _ in secs if t.casefold().startswith("current")), None)
+    best = max(secs, key=lambda x: hits(*x)) if terms else None
+    return best[0] if best and hits(*best)[0] else None
+
+def question_dates(question: str) -> set:
+    """The dates a question names, as (year, month, day) with None for a part it leaves out:
+    "2025" -> (2025, None, None), "september 8" -> (None, 9, 8), "2026-09-08" -> (2026, 9, 8)."""
+    q, out = fold(question), set()
+    for y, m, d in re.findall(r"\b((?:19|20)\d\d)-(\d\d)(?:-(\d\d))?\b", q):
+        out.add((int(y), int(m), int(d) if d else None))
+    for before, name, d in re.findall(r"(?:\b([a-z]+) )?\b([a-z]+)\.? (\d{1,2})(?:st|nd|rd|th)?\b", q):
+        if name == "may" and before in NOT_A_MONTH_BEFORE:  # "how may 2 ...", "it may 3x": the verb, not the month
+            continue
+        if name in MONTHS and 1 <= int(d) <= 31:
+            out.add((None, MONTHS[name], int(d)))
+    if not out:
+        out = {(int(y), None, None) for y in re.findall(r"\b((?:19|20)\d\d)\b", q)}
+    return out
+
+def name_dates(path: str) -> set:
+    """The dates in a file's name and folder, as (year, month, day) with None for a part the name leaves out."""
+    name = " ".join(Path(path).parts[-2:])
+    full = {(int(y), int(m), int(d) if d else None) for y, m, d in re.findall(r"(?<!\d)((?:19|20)\d\d)-(\d\d)(?:-(\d\d))?(?!\d)", name)}
+    return full or {(int(y), None, None) for y in re.findall(r"(?<!\d)((?:19|20)\d\d)(?!\d)", name)}
+
+def dates_agree(asked: set, named: set):
+    """True when the file's name carries a date the question names, False when it carries only other dates,
+    None when either side names no date (nothing to compare)."""
+    if not asked or not named:
+        return None
+    same = lambda a, b: all(x is None or y is None or x == y for x, y in zip(a, b))  # noqa: E731
+    return any(same(a, b) for a in asked for b in named)
 
 def word_pairs(text: str) -> set:
     """Adjacent content words of text (stopwords and 1-2 letter words skipped), by their
@@ -2948,9 +3055,19 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
     # them out of the coverage total so they do not sink every file.
     total = sum(idf[t] for t in terms if dfs[t]) or 1
     scored = []
+    asked, top_idf = question_dates(question), max(idf.values(), default=0)
+    dated = {t for t in terms if t.isdigit()}  # a number in the question names no kind
     for path, (ptr, _, _, hw, parts) in docs.items():
         f = tf[path]
-        if sum(idf[t] for t in terms if f[t]) / total < FALLBACK_MIN_COVERAGE:
+        segs = Path(path).parts
+        name, folder, above = (set(path_words(x)) for x in ([Path(path).stem], segs[-2:-1], segs[:-2]))
+        # The question names the kind of a living record (a word of its name or folder: "medications/current.md",
+        # "meds", "medicines"): that one current list answers it, above dated one-off files of the same kind.
+        kinds = set() if asked else {t for t in terms if t not in dated and (plural_forms(t) & name or plural_forms(t) & folder or kind_stem(t)
+                 and any(w.startswith(kind_stem(t)) for w in name | folder))}
+        living = bool(kinds) and living_record(path)
+        # a living record's kind word counts as covered even when its list never repeats it
+        if sum(idf[t] for t in terms if f[t] or (living and t in kinds)) / total < FALLBACK_MIN_COVERAGE:
             continue
         # Scored per passage, best passage wins: whole-file BM25 sank a long file
         # (36 KB medical timeline) whose one passage held every question word.
@@ -2960,7 +3077,19 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
         bm25 = max(sum(idf[t] * pf[t] * 2.2 / (pf[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
                    + PHRASE_WEIGHT * sum((idf[a] + idf[b]) / 2 for a, b in qpairs if f"{a[:4]} {b[:4]}" in pairs)
                    for pf, size, pairs in ((tf_of(c, hw), size, pairs) for c, size, pairs in parts))
-        scored.append((round(bm25, 3), path, ptr))
+        # Folders match the word itself or its plural only: a stem would make "medications" match every "medical"
+        # folder. A folder further up names a group the file belongs to ("ventures/ai-setup/..."): half the weight.
+        # Name and folder words match exactly or as a plural only: a loose stem made "latest" match "late".
+        bm25 += NAME_WEIGHT * sum(idf[t] * (1 if plural_forms(t) & (name | folder)
+                                            else 0.5 if plural_forms(t) & above else 0) for t in terms)
+        # A date the question names: a file named for it gains as much as a name word; one named for another date loses it.
+        agree = dates_agree(asked, name_dates(path))
+        if agree is not None:
+            bm25 += NAME_WEIGHT * top_idf * (1 if agree else -1)
+        scored.append((round(bm25, 3), path, ptr, living))  # a living record asked for by its kind: lifted below
+    base_top = max((x[0] for x in scored), default=0)
+    _STAGE["living"], _STAGE["word_question"] = [p for _s, p, _ptr, lv in scored if lv], question
+    scored = [(round(sc + base_top, 3) if lv else sc, p, ptr) for sc, p, ptr, lv in scored]
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
                       "ranked": ranked[:STAGE_LIST_CAP], "all": ranked,
@@ -2968,7 +3097,7 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
     # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
     # Measured against the best file still eligible, i.e. after routed files are skipped.
     rest = [r for r in ranked if r[1] not in skip]
-    floor = rest[0][0] * FALLBACK_REL_FLOOR if rest else 0
+    floor = min(rest[0][0], base_top) * FALLBACK_REL_FLOOR if rest else 0  # a lifted living record never raises it
     return [r for r in rest if r[0] >= floor][:limit]
 
 def confirm(question: str, paths: list):
@@ -3256,24 +3385,47 @@ def person_of(path: str, homes: dict):
             return homes[str(d)][0]
     return None
 
+# A word right after one of these is a thing, not a person ("my ivy", "an ivy"): it names no folder. "the" is not one:
+# "the Esteban file" / "ask the Esteban notes" still means the person when the name is a person folder.
+DETERMINERS = {"my", "your", "his", "her", "their", "a", "an", "this", "that"}
+
 def question_people(question: str, folks: dict) -> set:
     """Whose records the question is about: a relation word ("my dad") wins,
-    and person folder names ("belinda's") add their folders; "I"/"me" adds the
-    "self" folder too ("my wife and I"), and I/me/my alone means just "self".
+    and person folder names ("belinda's") add their folders, unless a determiner comes
+    right before the name ("my ivy" is a plant, not Ivy). "I"/"me" joined to another
+    person by "and" adds the "self" folder too ("my wife and I"); "I"/"me"/"my" alone means
+    just "self", and an "I" that only asks ("I need my dad's list") adds no one.
     A group word, or a relation no folder claims, filters nothing.
     Empty set = no one resolved, nothing is filtered."""
-    words = {w.removesuffix("'s").strip("'") for w in re.findall(r"(?:[^\W\d_]|')+", fold(question))}
+    seq = [w.removesuffix("'s").strip("'") for w in re.findall(r"(?:[^\W\d_]|')+", fold(question))]
+    # "my fathers list": a possessive typed without its apostrophe, right after "my"/"your", is the relation
+    seq = [w[:-1] if (i and seq[i - 1] in ("my", "your") and w.endswith("s") and w not in RELATIONS
+                      and w not in GROUP_WORDS and w[:-1] in RELATIONS) else w for i, w in enumerate(seq)]
+    words = set(seq)
     if words & GROUP_WORDS:
         return set()
     rel = {RELATIONS[w] for w in words if w in RELATIONS and w != "self"}
     by_rel = {n for n, r in folks.items() if r & rel}
     if rel and not by_rel:
         return set()
-    who = by_rel | {n for n in folks if fold(n) in words}
+    named = {w for i, w in enumerate(seq) if not (i and seq[i - 1] in DETERMINERS)}
+    who = by_rel | {n for n in folks if fold(n) in named}
     self_ = {n for n, r in folks.items() if "self" in r}
     if not who:
         return self_ if words & FIRST_PERSON else set()
-    return who | self_ if words & {"i", "me", "myself"} else who
+    joined = re.search(r"\b(?:and|&)\s+(?:i|me|myself)\b|\b(?:i|me)\s+(?:and|&)\b", fold(question))
+    return who | self_ if joined else who
+
+def with_people(question: str, who) -> str:
+    """The question as the word search reads it: a resolved person's folder name is added when the question
+    names them only by relation ("my dad" -> gustavo), so their own files match the person, not the word."""
+    have = set(words(question))
+    if not who:
+        return question
+    # The relation word that named them ("dad", "fathers") is then not a search word: their files rarely say it.
+    rel = lambda w: fold(w).strip("'").removesuffix("'s") in RELATIONS or fold(w).rstrip("s") in RELATIONS  # noqa: E731
+    kept = " ".join(w for w in question.split() if not rel(w.strip("?.!,")))
+    return " ".join([kept, *(n for n in sorted(who) if fold(n) not in have)])
 
 def _outcome_line(o: dict) -> str:
     return f"OUTCOME: {o['outcome']} - {o['why']}" + (f"; next: {o['cmd']}" if o["cmd"] else "")
@@ -3726,7 +3878,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             ix_ptrs = [p for p in search_pointers if p not in index_fb]
             ix_ptrs = index_served(idx_read.coverage(), ix_ptrs)
             fb_ptrs = [p for p in search_pointers if p not in ix_ptrs]
-            picked, fwhy = fts_pick(idx_read, question, ix_ptrs, who, other_person) if ix_ptrs else (None, "the index holds none of the searched pointers")
+            picked, fwhy = fts_pick(idx_read, with_people(question, who), ix_ptrs, who, other_person) if ix_ptrs else (None, "the index holds none of the searched pointers")
             if picked:
                 icands, fitems, ftocs, fts_nums, ftrace = picked
                 out_of_scope = set()  # the FTS scope already left out other people's files
@@ -3775,7 +3927,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     held_found = []  # reviewed, unchanged files whose text scans as a secret: searched by neither path, named as held
     held_paths = {c[1] for c in held_ix}
     toc_error = ""  # set when the zoom crashed (after its retry): a not-found is then uncertain
-    found = word_search(question, search_pointers, skip=out_of_scope,
+    found = word_search(with_people(question, who), search_pointers, skip=out_of_scope,
                         reads=reads, index_path=None if fts_nums else sdir / WORD_INDEX_FILE,
                         **({"candidates": (icands or []) + held_ix, "read_paths": (fb_paths - vouched) | held_paths}
                            if idx_read else {}),
@@ -3861,9 +4013,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 possible[p] = POSSIBLE_NOTE
         dropped = len(checked - set(keep) - {p for p, n in notes.items() if n == HELD_SECRET})
         # Completed evidence first, then unfinished checks. Routing only breaks
-        # content-score ties; stable paths break the remaining ties.
+        # content-score ties, then the read list's own order (the search's ranking); stable paths last.
+        read_rank = {p: i for i, p in enumerate(to_check)}
         merged = sorted(keep.values(), key=lambda m: (
-            notes.get(m[1]) != INCONCLUSIVE, m[0], route.get(m[1], 0), m[1]), reverse=True)
+            notes.get(m[1]) != INCONCLUSIVE, m[0], route.get(m[1], 0), -read_rank.get(m[1], len(read_rank)), m[1]),
+            reverse=True)
     if view_pointers and not _CLAIM["text"]:
         merged = raw_over_view(merged, view_pointers)
     if _CLAIM["text"] and to_check:
