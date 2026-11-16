@@ -56,3 +56,25 @@ def test_plural_forms_not_stems():
     assert {"venture", "ventures"} <= ask.plural_forms("venture")
     assert "tax" in ask.plural_forms("taxes")
     assert "medical" not in ask.plural_forms("medications")
+
+
+def test_joined_spelling_of_a_question_pair_is_a_name_word():
+    pairs = [("moon", "base"), ("base", "launch")]
+    assert {"moon", "base"} <= ask.joined_words({"moonbase", "plan"}, pairs)
+    assert ask.joined_words({"moon", "plan"}, pairs) == {"moon", "plan"}
+    assert ask.joined_words({"basemoon"}, pairs) == {"basemoon"}  # order matters: not the pair
+
+
+def test_joined_name_keeps_the_name_bonus(tmp_path):
+    # the better-matching file is named "moonbase-...": the name bonus a "moon-base-..." name gets must not
+    # lift the weaker file over it just because of how the name is spelled
+    import hashlib
+    texts = {"moonbase-launch-steps.md": "Moon base launch steps: 1 build, 2 test, 3 launch. Steps to launch.\n",
+             "moon-base-launch-notes.md": "Moon base notes: the launch moved. Steps later.\n"}
+    files = []
+    for name, text in texts.items():
+        (tmp_path / name).write_text(text)
+        files.append(("p", str(tmp_path / name), {"sha256": hashlib.sha256(text.encode()).hexdigest()}))
+    got = ask.word_search("what are the steps to launch a moon base", ["p"], candidates=files,
+                          read_paths={p for _, p, _ in files})
+    assert got and got[0][1] == files[0][1], [(s, Path(p).name) for s, p, _ in got]
