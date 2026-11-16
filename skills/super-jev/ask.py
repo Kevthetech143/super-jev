@@ -213,6 +213,7 @@ import io
 import itertools
 import math
 import json
+import ast
 import os
 import re
 import shlex
@@ -2954,6 +2955,34 @@ def term_variants(terms: list, vocab) -> dict:
         out[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
     return out
 
+CYCLE_SCRIPT = Path(__file__).resolve().parent.parent / "super-jev-build-cycle" / "build_cycle.py"
+_CYCLE_RECEIPTS = []
+
+def cycle_receipts() -> frozenset:
+    """The receipt file names the build cycle writes ("01-preflight.md", "06-check-report.skip.md"), from the
+    STEPS list in the cycle's own script (read, never run). No script: no names, so no folder is a run folder."""
+    if not _CYCLE_RECEIPTS:
+        names = set()
+        try:
+            tree = ast.parse(CYCLE_SCRIPT.read_text())
+            steps = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                         and any(isinstance(t, ast.Name) and t.id == "STEPS" for t in n.targets))
+            for k, step in enumerate(steps, 1):
+                names |= {f"{k:02d}-{step}.md", f"{k:02d}-{step}.skip.md"}
+        except (OSError, SyntaxError, ValueError, StopIteration, TypeError):
+            pass
+        _CYCLE_RECEIPTS.append(frozenset(names))
+    return _CYCLE_RECEIPTS[0]
+
+def is_run_folder(folder: str) -> bool:
+    """A build-cycle run folder: two or more of the cycle's own receipt files (named from its step list). One
+    job's working record, not a note of its own. A numbered guide ("01-intro.md", "02-setup.md") is not one."""
+    receipts = cycle_receipts()
+    try:
+        return bool(receipts) and sum(1 for n in os.listdir(folder) if n in receipts) >= 2
+    except OSError:
+        return False
+
 def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), extra=(),
                 reads=None, index_path=None, candidates=None, items=None, fts=None, read_paths=(), held=None) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
@@ -3102,8 +3131,15 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
     # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
     # Measured against the best file still eligible, i.e. after routed files are skipped.
     rest = [r for r in ranked if r[1] not in skip]
-    floor = min(rest[0][0], base_top) * FALLBACK_REL_FLOOR if rest else 0  # a lifted living record never raises it
-    return [r for r in rest if r[0] >= floor][:limit]
+    # A build-cycle run folder (two or more of the cycle's own step receipts) is the working record of one job: its
+    # files restate the note or skill the job produced. They neither set the weak-match floor nor take a read slot
+    # another file above the floor wants. The receipt names come from the cycle's step list, not from here.
+    runs = {d for d in {os.path.dirname(r[1]) for r in rest[:limit * 4]} if is_run_folder(d)}
+    lead = next((r for r in rest if os.path.dirname(r[1]) not in runs), rest[0] if rest else None)
+    floor = min(lead[0], base_top) * FALLBACK_REL_FLOOR if lead else 0  # a lifted living record never raises it
+    keep = [r for r in rest if r[0] >= floor]
+    return ([r for r in keep if os.path.dirname(r[1]) not in runs]
+            + [r for r in keep if os.path.dirname(r[1]) in runs])[:limit]
 
 def confirm(question: str, paths: list):
     """Check each path on its own, in one batched run. Returns ({path: score} for kept files,
@@ -3383,6 +3419,58 @@ def people(pointers: list, paths=None) -> dict:
     """{person folder name: relation words from its PROFILE's Relation line}."""
     return people_of(person_homes(pointers, paths))
 
+def fleet_people() -> dict:
+    """{person folder name: relation words} for every person folder connected for ANY agent on this machine (every
+    prepare-cache, not only the asker's sets). Only PROFILE paths and their Relation line are read, as person_homes
+    does; nothing else of another agent's sets is opened. The owner ("self") is nobody else's person: left out."""
+    paths = set()
+    for f in sorted(prepare_bulk.CACHE_DIR.glob("*.json")) if prepare_bulk.CACHE_DIR.is_dir() else ():
+        try:
+            raw = f.read_bytes()
+            if b"rofile." not in raw and b"ROFILE." not in raw:
+                continue
+            data = json.loads(raw)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            paths.update(p for p in data if isinstance(p, str) and Path(p).stem.lower() == "profile")
+    homes = {}
+    for path in sorted(paths):
+        if home := _profile_home(path):
+            homes.setdefault(home[0], (home[1], set()))[1].update(home[2])
+    return {n: r for n, r in people_of(homes).items() if r and "self" not in r}
+
+def named_people(question: str, folks: dict) -> set:
+    """The person folders the question names AS A PERSON. A name is a run of capitalised words (not the question's
+    first word) or ends in a possessive ("Esteban's", curly or straight); never a lowercase word ("mark it sold",
+    "water the ivy") and never right after the/our/its/my/his/her/a/an. A run of several capitalised words ("Rose
+    Gold") is a name only when it spells a whole folder name ("Esteban Ruiz" -> esteban-ruiz) or is possessive; a
+    single word or possessive matches a folder name's first word."""
+    toks = re.findall(r"[^\W\d_]+(?:['\u2019]s\b)?", question, re.I)
+    bare = [fold(re.sub(r"['\u2019]s$", "", t, flags=re.I)) for t in toks]
+    poss = [bool(re.search(r"['\u2019]s$", t, re.I)) for t in toks]
+    cap = [bool(i) and t[:1].isupper() for i, t in enumerate(toks)]
+    stop = DETERMINERS | {"the", "our", "its"}
+    hits, i = set(), 0
+    while i < len(toks):
+        j = i + 1
+        if cap[i]:
+            while j < len(toks) and cap[j] and not poss[j - 1]:
+                j += 1
+        elif not poss[i]:
+            i += 1
+            continue
+        run = bare[i:j]
+        if not (i and bare[i - 1] in stop):
+            for n in folks:
+                parts = [x for x in re.split(r"[-_\s]+", fold(n)) if x]
+                if run == parts or (parts and run == parts[:1] and (len(run) == 1 or poss[j - 1])):
+                    hits.add(n)
+                elif poss[j - 1] and len(run) > 1 and run[-len(parts):] == parts:
+                    hits.add(n)
+        i = j
+    return hits
+
 def person_of(path: str, homes: dict):
     """The name of the person folder holding `path`, or None."""
     for d in Path(path).parents:
@@ -3644,6 +3732,14 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         homes = person_homes(pointers)
     folks = people_of(homes)
     who = question_people(question, folks)
+    # A question about someone else (a person folder of any agent here) when the asker holds no files of theirs:
+    # the asker's own files are about other people, so nothing here can answer it. Say so; never confirm them.
+    strangers = sorted(named_people(question, fleet_people()) - set(folks)) if not who else []
+    if strangers:
+        _STAGE["person"] = {"who": [], "not_held": strangers, "dropped": []}
+        names = ", ".join(strangers)
+        return _done("not-found", f"not found for {names}: none of {principal}'s sets hold files about {names}",
+                     "", "none")
     def other_person(path: str) -> bool:
         return bool(who) and person_of(path, homes) not in (None, *who)
     _STAGE["person"] = {"who": sorted(who), "dropped": []}
