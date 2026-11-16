@@ -119,7 +119,9 @@ def test_words_that_are_not_people(question):
     ("when does Ottoline\u2019s policy renew", {"ottoline"}),
     ("ask Ottoline about the plan", {"ottoline"}),
     ("did Brannoc Vey file the form", {"brannoc-vey"}),
-    ("what is Brannoc's address", {"brannoc-vey"})])
+    ("what is Brannoc's address", {"brannoc-vey"}),
+    ("where are OTTOLINE\u2019S notes", {"ottoline"}),
+    ("who is OTTOLINE'S doctor", {"ottoline"})])
 def test_names_used_as_people(question, who):
     assert ask.named_people(question, FOLKS) == who
 

@@ -3446,9 +3446,9 @@ def named_people(question: str, folks: dict) -> set:
     "water the ivy") and never right after the/our/its/my/his/her/a/an. A run of several capitalised words ("Rose
     Gold") is a name only when it spells a whole folder name ("Esteban Ruiz" -> esteban-ruiz) or is possessive; a
     single word or possessive matches a folder name's first word."""
-    toks = re.findall(r"[^\W\d_]+(?:['\u2019]s\b)?", question)
-    bare = [fold(re.sub(r"['\u2019]s$", "", t)) for t in toks]
-    poss = [bool(re.search(r"['\u2019]s$", t)) for t in toks]
+    toks = re.findall(r"[^\W\d_]+(?:['\u2019]s\b)?", question, re.I)
+    bare = [fold(re.sub(r"['\u2019]s$", "", t, flags=re.I)) for t in toks]
+    poss = [bool(re.search(r"['\u2019]s$", t, re.I)) for t in toks]
     cap = [bool(i) and t[:1].isupper() for i, t in enumerate(toks)]
     stop = DETERMINERS | {"the", "our", "its"}
     hits, i = set(), 0
