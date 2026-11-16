@@ -213,6 +213,7 @@ import io
 import itertools
 import math
 import json
+import ast
 import os
 import re
 import shlex
@@ -2954,13 +2955,31 @@ def term_variants(terms: list, vocab) -> dict:
         out[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
     return out
 
-STEP_FILE = re.compile(r"^\d{1,3}-[^\W\d_]")  # a numbered step: "01-preflight.md", "10-learn.md"
+CYCLE_SCRIPT = Path(__file__).resolve().parent.parent / "super-jev-build-cycle" / "build_cycle.py"
+_CYCLE_RECEIPTS = []
+
+def cycle_receipts() -> frozenset:
+    """The receipt file names the build cycle writes ("01-preflight.md", "06-check-report.skip.md"), from the
+    STEPS list in the cycle's own script (read, never run). No script: no names, so no folder is a run folder."""
+    if not _CYCLE_RECEIPTS:
+        names = set()
+        try:
+            tree = ast.parse(CYCLE_SCRIPT.read_text())
+            steps = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                         and any(isinstance(t, ast.Name) and t.id == "STEPS" for t in n.targets))
+            for k, step in enumerate(steps, 1):
+                names |= {f"{k:02d}-{step}.md", f"{k:02d}-{step}.skip.md"}
+        except (OSError, SyntaxError, ValueError, StopIteration, TypeError):
+            pass
+        _CYCLE_RECEIPTS.append(frozenset(names))
+    return _CYCLE_RECEIPTS[0]
 
 def is_run_folder(folder: str) -> bool:
-    """A folder holding two or more numbered step files: one job's working record, not a note of its own.
-    Read from the folder listing, so it holds whichever of its files the search happened to score."""
+    """A build-cycle run folder: two or more of the cycle's own receipt files (named from its step list). One
+    job's working record, not a note of its own. A numbered guide ("01-intro.md", "02-setup.md") is not one."""
+    receipts = cycle_receipts()
     try:
-        return sum(1 for n in os.listdir(folder) if STEP_FILE.match(n)) >= 2
+        return bool(receipts) and sum(1 for n in os.listdir(folder) if n in receipts) >= 2
     except OSError:
         return False
 
@@ -3112,9 +3131,9 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
     # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
     # Measured against the best file still eligible, i.e. after routed files are skipped.
     rest = [r for r in ranked if r[1] not in skip]
-    # A run folder (two or more numbered step files, "01-preflight.md", "10-learn.md") is the working record of
-    # one job: its files restate the note or skill the job produced. They neither set the weak-match floor nor
-    # take a read slot another file above the floor wants. Told apart by folder shape, never by names.
+    # A build-cycle run folder (two or more of the cycle's own step receipts) is the working record of one job: its
+    # files restate the note or skill the job produced. They neither set the weak-match floor nor take a read slot
+    # another file above the floor wants. The receipt names come from the cycle's step list, not from here.
     runs = {d for d in {os.path.dirname(r[1]) for r in rest[:limit * 4]} if is_run_folder(d)}
     lead = next((r for r in rest if os.path.dirname(r[1]) not in runs), rest[0] if rest else None)
     floor = min(lead[0], base_top) * FALLBACK_REL_FLOOR if lead else 0  # a lifted living record never raises it
@@ -3422,11 +3441,35 @@ def fleet_people() -> dict:
     return {n: r for n, r in people_of(homes).items() if r and "self" not in r}
 
 def named_people(question: str, folks: dict) -> set:
-    """The person folder names the question names by name (a determiner before the word makes it a thing, as in
-    question_people). Relations are not names: "my dad" names no one here."""
-    seq = [w.removesuffix("'s").strip("'") for w in re.findall(r"(?:[^\W\d_]|')+", fold(question))]
-    named = {w for i, w in enumerate(seq) if not (i and seq[i - 1] in DETERMINERS)}
-    return {n for n in folks if fold(n) in named}
+    """The person folders the question names AS A PERSON. A name is a run of capitalised words (not the question's
+    first word) or ends in a possessive ("Esteban's", curly or straight); never a lowercase word ("mark it sold",
+    "water the ivy") and never right after the/our/its/my/his/her/a/an. A run of several capitalised words ("Rose
+    Gold") is a name only when it spells a whole folder name ("Esteban Ruiz" -> esteban-ruiz) or is possessive; a
+    single word or possessive matches a folder name's first word."""
+    toks = re.findall(r"[^\W\d_]+(?:['\u2019]s\b)?", question)
+    bare = [fold(re.sub(r"['\u2019]s$", "", t)) for t in toks]
+    poss = [bool(re.search(r"['\u2019]s$", t)) for t in toks]
+    cap = [bool(i) and t[:1].isupper() for i, t in enumerate(toks)]
+    stop = DETERMINERS | {"the", "our", "its"}
+    hits, i = set(), 0
+    while i < len(toks):
+        j = i + 1
+        if cap[i]:
+            while j < len(toks) and cap[j] and not poss[j - 1]:
+                j += 1
+        elif not poss[i]:
+            i += 1
+            continue
+        run = bare[i:j]
+        if not (i and bare[i - 1] in stop):
+            for n in folks:
+                parts = [x for x in re.split(r"[-_\s]+", fold(n)) if x]
+                if run == parts or (parts and run == parts[:1] and (len(run) == 1 or poss[j - 1])):
+                    hits.add(n)
+                elif poss[j - 1] and len(run) > 1 and run[-len(parts):] == parts:
+                    hits.add(n)
+        i = j
+    return hits
 
 def person_of(path: str, homes: dict):
     """The name of the person folder holding `path`, or None."""

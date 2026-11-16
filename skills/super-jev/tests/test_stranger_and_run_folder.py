@@ -80,9 +80,12 @@ def test_run_folder_ranks_below_its_note(tmp_path):
     note = tmp_path / "notes" / "glimmer.md"
     note.parent.mkdir()
     note.write_text("x")
-    plain = tmp_path / "notes" / "01-intro.md"  # one numbered file alone is no run folder
-    plain.write_text("x")
+    guide = tmp_path / "docs"  # a numbered guide is no run folder: its names are not the cycle's receipts
+    guide.mkdir()
+    for n in ("01-intro.md", "02-setup.md", "03-usage.md", "summary.md"):
+        (guide / n).write_text("x")
     assert ask.is_run_folder(str(run)) and not ask.is_run_folder(str(note.parent))
+    assert not ask.is_run_folder(str(guide))
 
 
 def test_run_folder_files_take_slots_after_the_note(tmp_path, monkeypatch):
@@ -99,3 +102,35 @@ def test_run_folder_files_take_slots_after_the_note(tmp_path, monkeypatch):
     got = [Path(p).name for _s, p, _ptr in ask.word_search("what is the zibber flange setting", names)]
     assert got[0] == "answer.md"
     assert len(got) == 5  # the step files still fill the slots left over
+
+
+FOLKS = {"ottoline": {"sister"}, "mark": {"friend"}, "ivy": {"sister"}, "rose": {"aunt"}, "brannoc-vey": {"uncle"}}
+
+
+@pytest.mark.parametrize("question", [
+    "How do I mark an item sold?", "Mark sold 673", "water the ivy", "our Ivy plant", "rose gold iPhone price",
+    "is Rose Gold in stock", "when is the Ivy appointment", "what did Vey say"])
+def test_words_that_are_not_people(question):
+    assert ask.named_people(question, FOLKS) == set()
+
+
+@pytest.mark.parametrize("question,who", [
+    ("what is Ottoline's account level", {"ottoline"}),
+    ("when does Ottoline\u2019s policy renew", {"ottoline"}),
+    ("ask Ottoline about the plan", {"ottoline"}),
+    ("did Brannoc Vey file the form", {"brannoc-vey"}),
+    ("what is Brannoc's address", {"brannoc-vey"})])
+def test_names_used_as_people(question, who):
+    assert ask.named_people(question, FOLKS) == who
+
+
+def test_numbered_guide_is_not_demoted(tmp_path, monkeypatch):
+    notes, names, _sdir = build(tmp_path, monkeypatch, 30)
+    put(ask.prepare_bulk.CACHE_DIR, notes, "p0", {
+        "guide/01-intro.md": "# Intro\nThe quorlap dial setting is seven on the quorlap dial setting page.\n",
+        "guide/02-setup.md": "# Setup\nquorlap dial setting quorlap dial setting.\n",
+        "kept/other.md": "# Other\nA quorlap dial was mentioned once with no setting.\n",
+    })
+    Rig(monkeypatch, notes, names)
+    got = [Path(p).name for _s, p, _ptr in ask.word_search("what is the quorlap dial setting", names)]
+    assert set(got[:2]) == {"01-intro.md", "02-setup.md"}  # not pushed below the weaker file
