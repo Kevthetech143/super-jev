@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Not found for a person the asker holds nothing about.** A question that names another agent's person folder (a PROFILE with a non-self Relation line, found in any prepare-cache on the machine) when the asking agent has none of that person's files now ends `not-found - not found for <name>` before any search, instead of confirming the asker's own files about someone else. The owner (`self`) never counts; a determiner before the word ("my ivy") keeps it a thing.
+- **Run folders rank below the notes they produced.** A folder with two or more numbered step files is one job's working record: its files take only the word-search read slots left over and no longer set the weak-match floor, so the note or skill the job wrote is read first. Decided by folder shape, no names.
+
 ## 1.0.142 — 2026-11-16
 
 - **Name bonus: a joined file-name word matches two adjacent question words.** A file named with one joined word now earns the name bonus when the question spells it as two neighboring words (PR 404). Structural only: no names, no word lists.

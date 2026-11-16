@@ -2954,6 +2954,16 @@ def term_variants(terms: list, vocab) -> dict:
         out[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
     return out
 
+STEP_FILE = re.compile(r"^\d{1,3}-[^\W\d_]")  # a numbered step: "01-preflight.md", "10-learn.md"
+
+def is_run_folder(folder: str) -> bool:
+    """A folder holding two or more numbered step files: one job's working record, not a note of its own.
+    Read from the folder listing, so it holds whichever of its files the search happened to score."""
+    try:
+        return sum(1 for n in os.listdir(folder) if STEP_FILE.match(n)) >= 2
+    except OSError:
+        return False
+
 def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), extra=(),
                 reads=None, index_path=None, candidates=None, items=None, fts=None, read_paths=(), held=None) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
@@ -3102,8 +3112,15 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
     # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
     # Measured against the best file still eligible, i.e. after routed files are skipped.
     rest = [r for r in ranked if r[1] not in skip]
-    floor = min(rest[0][0], base_top) * FALLBACK_REL_FLOOR if rest else 0  # a lifted living record never raises it
-    return [r for r in rest if r[0] >= floor][:limit]
+    # A run folder (two or more numbered step files, "01-preflight.md", "10-learn.md") is the working record of
+    # one job: its files restate the note or skill the job produced. They neither set the weak-match floor nor
+    # take a read slot another file above the floor wants. Told apart by folder shape, never by names.
+    runs = {d for d in {os.path.dirname(r[1]) for r in rest[:limit * 4]} if is_run_folder(d)}
+    lead = next((r for r in rest if os.path.dirname(r[1]) not in runs), rest[0] if rest else None)
+    floor = min(lead[0], base_top) * FALLBACK_REL_FLOOR if lead else 0  # a lifted living record never raises it
+    keep = [r for r in rest if r[0] >= floor]
+    return ([r for r in keep if os.path.dirname(r[1]) not in runs]
+            + [r for r in keep if os.path.dirname(r[1]) in runs])[:limit]
 
 def confirm(question: str, paths: list):
     """Check each path on its own, in one batched run. Returns ({path: score} for kept files,
@@ -3383,6 +3400,34 @@ def people(pointers: list, paths=None) -> dict:
     """{person folder name: relation words from its PROFILE's Relation line}."""
     return people_of(person_homes(pointers, paths))
 
+def fleet_people() -> dict:
+    """{person folder name: relation words} for every person folder connected for ANY agent on this machine (every
+    prepare-cache, not only the asker's sets). Only PROFILE paths and their Relation line are read, as person_homes
+    does; nothing else of another agent's sets is opened. The owner ("self") is nobody else's person: left out."""
+    paths = set()
+    for f in sorted(prepare_bulk.CACHE_DIR.glob("*.json")) if prepare_bulk.CACHE_DIR.is_dir() else ():
+        try:
+            raw = f.read_bytes()
+            if b"rofile." not in raw and b"ROFILE." not in raw:
+                continue
+            data = json.loads(raw)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            paths.update(p for p in data if isinstance(p, str) and Path(p).stem.lower() == "profile")
+    homes = {}
+    for path in sorted(paths):
+        if home := _profile_home(path):
+            homes.setdefault(home[0], (home[1], set()))[1].update(home[2])
+    return {n: r for n, r in people_of(homes).items() if r and "self" not in r}
+
+def named_people(question: str, folks: dict) -> set:
+    """The person folder names the question names by name (a determiner before the word makes it a thing, as in
+    question_people). Relations are not names: "my dad" names no one here."""
+    seq = [w.removesuffix("'s").strip("'") for w in re.findall(r"(?:[^\W\d_]|')+", fold(question))]
+    named = {w for i, w in enumerate(seq) if not (i and seq[i - 1] in DETERMINERS)}
+    return {n for n in folks if fold(n) in named}
+
 def person_of(path: str, homes: dict):
     """The name of the person folder holding `path`, or None."""
     for d in Path(path).parents:
@@ -3644,6 +3689,14 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         homes = person_homes(pointers)
     folks = people_of(homes)
     who = question_people(question, folks)
+    # A question about someone else (a person folder of any agent here) when the asker holds no files of theirs:
+    # the asker's own files are about other people, so nothing here can answer it. Say so; never confirm them.
+    strangers = sorted(named_people(question, fleet_people()) - set(folks)) if not who else []
+    if strangers:
+        _STAGE["person"] = {"who": [], "not_held": strangers, "dropped": []}
+        names = ", ".join(strangers)
+        return _done("not-found", f"not found for {names}: none of {principal}'s sets hold files about {names}",
+                     "", "none")
     def other_person(path: str) -> bool:
         return bool(who) and person_of(path, homes) not in (None, *who)
     _STAGE["person"] = {"who": sorted(who), "dropped": []}
