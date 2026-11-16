@@ -281,10 +281,8 @@ def test_the_pages_say_large_comes_after_its_own_test(page):
 
 
 def test_the_changelog_entry_says_large_comes_after_its_own_test():
-    version = json.loads((REPO / "package.json").read_text())["version"]
     entries = re.split(r"^## ", (REPO / "CHANGELOG.md").read_text(), flags=re.M)[1:]
-    heading, body = entries[0].split("\n", 1)
-    assert heading.startswith(version), f"the top changelog entry is {heading!r}, package.json says {version}"  # no version bump for this
+    heading, body = next(e.split("\n", 1) for e in entries if e.startswith("1.0.139 "))  # the release that shipped context sizes
     flat = " ".join(body.split())
     assert re.search(r"Large[^.]{0,80}after its own test", flat), "the top entry does not say Large comes after its own test"
     assert "small|medium|large" not in flat.lower() and "three sizes" not in flat.lower()
