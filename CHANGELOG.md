@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.142 — 2026-11-16
+
+- **Name bonus: a joined file-name word matches two adjacent question words.** A file named with one joined word now earns the name bonus when the question spells it as two neighboring words (PR 404). Structural only: no names, no word lists.
+
 ## 1.0.141 — 2026-11-15
 
 - **Word-search ranking rules, ported from the app's copy (super-jev-app PRs 26 and 27).** All structural: no names, no topic word lists. Person scoping reads the question: an "I" that only asks no longer adds the asker, a name right after a determiner ("my ivy") is a thing, "the <Name>" scopes to that person, and a person named only by a relation ("my dad", "my fathers") gets their folder name added and the relation word dropped. A question word in a file's own name or parent folder adds its weight once (a higher folder half; folders match the word or its plural, never a stem). A date the question names lifts a file named for that date and lowers one named for another date; "may" is the month only right before a day number and not after a modal, pronoun or question word. With no decision model every check is inconclusive, and ties now keep the search order instead of reverse path order. A living record (an "Entry rule:" line, one "## Current" and a "## Change log") whose name or folder names the question's kind ranks above dated one-off files, unless the question names a date. Each returned file names the headed section that matched: `--json` gains `section`, and the text output adds an indented `section: <path> > <section>` line under the file line (file lines unchanged). Tests: `skills/super-jev/tests/test_search_structure_rules.py`, `test_living_record_first.py`.
