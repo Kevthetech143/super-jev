@@ -2983,15 +2983,12 @@ def is_run_folder(folder: str) -> bool:
     except OSError:
         return False
 
-NAME_BONUS = 0.02  # per question word in the file's own name (two at most)
 RUN_PENALTY = 0.05  # a build-cycle run folder's receipt: one job's working record, not the note itself
 
-def rank_score(question: str, content: float, path: str) -> float:
-    """Sort value for confirmed files whose content scores sit close: a file named for the question's words
-    edges ahead, a run folder's receipt edges behind. The score shown stays the content score."""
-    stem = Path(path).stem.replace("-", " ").replace("_", " ")
-    return (content + NAME_BONUS * min(term_hits(query_terms(question), stem), 2)
-            - (RUN_PENALTY if is_run_folder(os.path.dirname(path)) else 0))
+def rank_score(content: float, path: str) -> float:
+    """Sort value for confirmed files: a run folder's receipt edges behind a note whose content score is close.
+    The score shown stays the content score."""
+    return content - (RUN_PENALTY if is_run_folder(os.path.dirname(path)) else 0)
 
 def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), extra=(),
                 reads=None, index_path=None, candidates=None, items=None, fts=None, read_paths=(), held=None) -> list:
@@ -4127,7 +4124,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         # content-score ties, then the read list's own order (the search's ranking); stable paths last.
         read_rank = {p: i for i, p in enumerate(to_check)}
         merged = sorted(keep.values(), key=lambda m: (
-            notes.get(m[1]) != INCONCLUSIVE, rank_score(question, m[0], m[1]), route.get(m[1], 0),
+            notes.get(m[1]) != INCONCLUSIVE, rank_score(m[0], m[1]), route.get(m[1], 0),
             -read_rank.get(m[1], len(read_rank)), m[1]),
             reverse=True)
     if view_pointers and not _CLAIM["text"]:

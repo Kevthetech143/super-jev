@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Ranking: among close content scores a file named for the question's words edges ahead and a
-build-cycle run folder's receipt edges behind. No network.
+"""Ranking: a build-cycle run folder's receipt edges behind a note with a close content score; a name
+that shares question words never edges a file ahead. No network.
 
     python3 -m pytest skills/super-jev/tests/test_rank_score.py -q
 """
@@ -15,16 +15,20 @@ ask = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ask)
 
 
-def test_named_file_edges_past_a_close_unnamed_one():
-    q = "where is the together ai api key kept"
-    assert ask.rank_score(q, 0.99, "/n/together-ai.md") > ask.rank_score(q, 1.0, "/n/ssh-access.md")
-
-
-def test_a_far_lower_score_is_not_rescued_by_its_name():
-    q = "where is the together ai api key kept"
-    assert ask.rank_score(q, 0.80, "/n/together-ai.md") < ask.rank_score(q, 1.0, "/n/ssh-access.md")
-
-
-def test_run_folder_receipt_edges_behind(tmp_path, monkeypatch):
+def test_run_folder_receipt_edges_behind(monkeypatch):
     monkeypatch.setattr(ask, "is_run_folder", lambda folder: folder.endswith("run"))
-    assert ask.rank_score("a note", 1.0, "/x/run/10-learn.md") < ask.rank_score("a note", 0.99, "/x/notes/a.md")
+    assert ask.rank_score(1.0, "/x/run/10-learn.md") < ask.rank_score(0.99, "/x/notes/a.md")
+
+
+def test_a_far_higher_receipt_score_still_wins(monkeypatch):
+    monkeypatch.setattr(ask, "is_run_folder", lambda folder: folder.endswith("run"))
+    assert ask.rank_score(1.0, "/x/run/10-learn.md") > ask.rank_score(0.90, "/x/notes/a.md")
+
+
+def test_a_shared_name_word_never_reorders(monkeypatch):
+    # "which email address is tied to Amazon Seller Central": the generic faq that shares the word "amazon"
+    # keeps its content rank; the right note is not pushed below it by name words (no name bonus)
+    monkeypatch.setattr(ask, "is_run_folder", lambda folder: False)
+    faq, note = "/r/faq/global-faq-amazon-bm-fb-1.md", "/b/gmail-accounts.md"
+    assert ask.rank_score(0.96, note) > ask.rank_score(0.95, faq)
+    assert ask.rank_score(0.96, note) == 0.96

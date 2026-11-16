@@ -181,7 +181,7 @@ def test_ordinary_lookup_checks_routed_and_word_matched_candidates(tmp_path, mon
 def test_exact_ties_have_stable_path_order(tmp_path, monkeypatch, capsys):
     reuse = tmp_path / "global" / "reuse" / "sendmessage-revives-teammate.md"
     local = tmp_path / "brain" / "notebook" / "sendmessage-revives-teammate.md"
-    other = tmp_path / "brain" / "archive" / "sendmessage-revives-teammate.md"  # same name words: a true tie
+    other = tmp_path / "brain" / "notes.md"
     for f in (reuse, local, other):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("x")
