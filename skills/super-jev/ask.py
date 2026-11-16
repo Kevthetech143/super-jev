@@ -2109,6 +2109,11 @@ MONTHS.update({m[:3]: i for m, i in list(MONTHS.items())})
 def path_words(parts) -> list:
     return words(" ".join(parts).replace("-", " ").replace("_", " "))
 
+def joined_words(ws: set, qpairs) -> set:
+    """Path words, plus both words of an adjacent question pair the path writes as one word: "super jev" asked
+    and a file named "superjev-plan" counts both, as "super-jev-plan" already does. Spelling is not meaning."""
+    return ws | {t for a, b in qpairs if a + b in ws for t in (a, b)}
+
 def plural_forms(t: str) -> set:
     """A word and its plain singular/plural forms: venture/ventures, tax/taxes."""
     return {t, t + "s", t + "es", t[:-1] if t.endswith("s") else t, t[:-2] if t.endswith("es") else t}
@@ -3060,7 +3065,7 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
     for path, (ptr, _, _, hw, parts) in docs.items():
         f = tf[path]
         segs = Path(path).parts
-        name, folder, above = (set(path_words(x)) for x in ([Path(path).stem], segs[-2:-1], segs[:-2]))
+        name, folder, above = (joined_words(set(path_words(x)), qpairs) for x in ([Path(path).stem], segs[-2:-1], segs[:-2]))
         # The question names the kind of a living record (a word of its name or folder: "medications/current.md",
         # "meds", "medicines"): that one current list answers it, above dated one-off files of the same kind.
         kinds = set() if asked else {t for t in terms if t not in dated and (plural_forms(t) & name or plural_forms(t) & folder or kind_stem(t)
