@@ -999,6 +999,9 @@ WORD_HITS, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.55
 # Without a judge, a word-search file is offered only when the question's words sit together in one of its passages
 # (share of the question's weighted words) or its name, heading and description carry most of them.
 CODE_ONLY_PASSAGE_COVER, CODE_ONLY_HEAD_COVER = 0.6, 0.5
+CODE_ONLY_GATE_WHY = ("no match: no judge checked the word-search hits and they did not carry the question's words, "
+                      "so the coverage check held them back (listed as code_only_gate); retry when the judge is up, "
+                      "or read those hits yourself")
 READ_MAX = zoom.KEEP_FILES + WORD_HITS  # most files one ask's content check reads: the zoom's picks plus the hits
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
 # Words are Unicode letters/digits, case- and accent-folded, so "¿Cuántas medicinas
@@ -4137,8 +4140,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         merged.sort(key=lambda item: (scores.get(item[1], 0), route.get(item[1], 0)), reverse=True)
         possible.update({p: POSSIBLE_NOTE for _s, p, _ptr in merged})
     top = merged[:5]
-    if top and not _CLAIM["text"] and not replay and to_check and all(notes.get(p) == INCONCLUSIVE for p in to_check):
-        # No judge answered a single check: nothing vouches for these files but the word search, so it must vouch
+    if top and not route and not _CLAIM["text"] and not replay and to_check and all(notes.get(p) == INCONCLUSIVE for p in to_check):
+        # No judge answered a single check and no routing answered either (true code-only): nothing vouches for these files but the word search, so it must vouch
         # alone. A best file whose passages and head do not carry the question's words is no answer: say not found.
         wsearch = _STAGE.get("word") or {}
         pc, hc = wsearch.get("pcover") or {}, wsearch.get("hcover") or {}
@@ -4329,6 +4332,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         _RESULT["older_catalog"] = list(older)
         print(f"served from older catalog: {len(older)} set{'s' if len(older) != 1 else ''}")
     errors = error_rows(failed, nav_kinds)
+    if _STAGE.get("code_only_gate"):
+        _RESULT["code_only_gate"] = [p.replace(str(Path.home()), "~") for p in _STAGE["code_only_gate"]]
     _RESULT.update(files=file_list, skills=skill_list, leans_none=leans, errors=errors,
                    unsearched=unsearched_rows(unsearched, state_of, healing), left_out=left_out_rows(edited_out, held))
     if why := SKILL_FAILED.pop(question, "") if skill_job else (
@@ -4356,7 +4361,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     _RESULT["left_out"] = left_out_rows(skipped + edited_out, held)
     ask_py = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal}"
     if failed or check_error or toc_error:
-        why = (f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
+        why = (CODE_ONLY_GATE_WHY if _STAGE.get("code_only_gate") and not failed
+               else f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
                else "no match, and the content check failed" if check_error
                else f"not found, but the {ZOOM_FAILED.format(reason=toc_error)}, so this may be a miss; ask again")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
