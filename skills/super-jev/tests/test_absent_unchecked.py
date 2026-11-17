@@ -72,3 +72,30 @@ def test_a_passing_file_beside_an_unchecked_one_is_still_found(tmp_path, monkeyp
     rc, out = _ask(tmp_path, capsys)
     assert ask._RESULT["outcome"] == "found" and rc == 0
     assert ask._RESULT["files"][0]["path"] == paths["hours.md"]
+
+
+def _word_stage(monkeypatch, paths, pcover, hcover):
+    def fake(*a, **k):
+        ask._STAGE["word"] = {"terms": ["x"], "ranked": [], "all": [], "cover": {}, "pcover": pcover, "hcover": hcover}
+        return [(5.0, paths["menu.md"], "p1")]
+    monkeypatch.setattr(ask, "word_search", fake)
+
+
+@pytest.mark.parametrize("pc,hc,listed", [(0.3, 0.2, False), (0.7, 0.0, True), (0.1, 0.6, True)])
+def test_code_only_word_hit_needs_passage_or_head_coverage(tmp_path, monkeypatch, capsys, pc, hc, listed):
+    """No judge answered: a word-search file that neither holds the question's words in one passage nor carries
+    them in its name/heading is dropped (clean not-found, no file list); a well-covered one stays unchecked."""
+    paths = _setup(tmp_path, monkeypatch, {"menu.md": 0.0}, {}, {"menu.md": ask.INCONCLUSIVE}, "judge unreachable")
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), "judge unreachable", {p: ask.INCONCLUSIVE for p in ps}))
+    _word_stage(monkeypatch, paths, {paths["menu.md"]: pc}, {paths["menu.md"]: hc})
+    rc, out = _ask(tmp_path, capsys)
+    assert ask._RESULT["outcome"] != "found"  # no judge ran: never found, whatever the gate does
+    assert bool(ask._RESULT.get("files")) == listed
+
+
+def test_code_only_gate_leaves_a_judged_file_alone(tmp_path, monkeypatch, capsys):
+    """Jev on: a file the content check passed is never touched by the word-coverage gate."""
+    paths = _setup(tmp_path, monkeypatch, {"menu.md": 0.9}, {"menu.md": 0.95}, {}, None)
+    _word_stage(monkeypatch, paths, {paths["menu.md"]: 0.0}, {paths["menu.md"]: 0.0})
+    rc, out = _ask(tmp_path, capsys)
+    assert ask._RESULT["outcome"] == "found" and ask._RESULT["files"][0]["path"] == paths["menu.md"]
