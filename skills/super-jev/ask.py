@@ -996,6 +996,12 @@ POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file befo
 # searched locally for the question's words (typo-tolerant). Its best WORD_HITS files are
 # the zoom's safety net (kept at every level) and, when the zoom fails, the whole read list.
 WORD_HITS, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.55
+# Without a judge, a word-search file is offered only when the question's words sit together in one of its passages
+# (share of the question's weighted words) or its name, heading and description carry most of them.
+CODE_ONLY_PASSAGE_COVER, CODE_ONLY_HEAD_COVER = 0.6, 0.5
+CODE_ONLY_GATE_WHY = ("no match: no judge checked the word-search hits and they did not carry the question's words, "
+                      "so the coverage check held them back (listed as code_only_gate); retry when the judge is up, "
+                      "or read those hits yourself")
 READ_MAX = zoom.KEEP_FILES + WORD_HITS  # most files one ask's content check reads: the zoom's picks plus the hits
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
 # Words are Unicode letters/digits, case- and accent-folded, so "¿Cuántas medicinas
@@ -3088,7 +3094,7 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
     # Words no reviewed file contains (e.g. "time") cannot tell files apart; leave
     # them out of the coverage total so they do not sink every file.
     total = sum(idf[t] for t in terms if dfs[t]) or 1
-    scored = []
+    scored, pcover, hcover = [], {}, {}
     asked, top_idf = question_dates(question), max(idf.values(), default=0)
     dated = {t for t in terms if t.isdigit()}  # a number in the question names no kind
     for path, (ptr, _, _, hw, parts) in docs.items():
@@ -3108,9 +3114,12 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
         # Two question words side by side in a passage (a phrase: "read the source",
         # "parent folder") add their weight once more: scattered matches tie often, and a
         # file stating the phrase was left one slot past the read list.
-        bm25 = max(sum(idf[t] * pf[t] * 2.2 / (pf[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
-                   + PHRASE_WEIGHT * sum((idf[a] + idf[b]) / 2 for a, b in qpairs if f"{a[:4]} {b[:4]}" in pairs)
-                   for pf, size, pairs in ((tf_of(c, hw), size, pairs) for c, size, pairs in parts))
+        per_passage = [(sum(idf[t] * pf[t] * 2.2 / (pf[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
+                        + PHRASE_WEIGHT * sum((idf[a] + idf[b]) / 2 for a, b in qpairs if f"{a[:4]} {b[:4]}" in pairs),
+                        sum(idf[t] for t in terms if pf[t]) / total)
+                       for pf, size, pairs in ((tf_of(c, hw), size, pairs) for c, size, pairs in parts)]
+        bm25, pcover[path] = max(per_passage)
+        hcover[path] = sum(idf[t] for t in terms if any(v in hw for v in variants[t])) / total
         # Folders match the word itself or its plural only: a stem would make "medications" match every "medical"
         # folder. A folder further up names a group the file belongs to ("ventures/ai-setup/..."): half the weight.
         # Name and folder words match exactly or as a plural only: a loose stem made "latest" match "late".
@@ -3127,7 +3136,8 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
                       "ranked": ranked[:STAGE_LIST_CAP], "all": ranked,
-                      "cover": {p: sum(idf[t] for t in terms if f[t]) / total for p, f in tf.items()}}
+                      "cover": {p: sum(idf[t] for t in terms if f[t]) / total for p, f in tf.items()},
+                      "pcover": pcover, "hcover": hcover}
     # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
     # Measured against the best file still eligible, i.e. after routed files are skipped.
     rest = [r for r in ranked if r[1] not in skip]
@@ -4130,6 +4140,15 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         merged.sort(key=lambda item: (scores.get(item[1], 0), route.get(item[1], 0)), reverse=True)
         possible.update({p: POSSIBLE_NOTE for _s, p, _ptr in merged})
     top = merged[:5]
+    if top and not route and not _CLAIM["text"] and not replay and to_check and all(notes.get(p) == INCONCLUSIVE for p in to_check):
+        # No judge answered a single check and no routing answered either (true code-only): nothing vouches for these files but the word search, so it must vouch
+        # alone. A best file whose passages and head do not carry the question's words is no answer: say not found.
+        wsearch = _STAGE.get("word") or {}
+        pc, hc = wsearch.get("pcover") or {}, wsearch.get("hcover") or {}
+        lead = top[0][1]  # the file a caller reads first must vouch for itself
+        if pc and pc.get(lead, 0) < CODE_ONLY_PASSAGE_COVER and hc.get(lead, 0) < CODE_ONLY_HEAD_COVER:
+            _STAGE["code_only_gate"] = [p for _s, p, _ptr in top]
+            top = []
     if _CLAIM["text"]:
         top = apply_near_twin_tiebreak(question, top)
     # Listwise choice step: see judge_listwise.
@@ -4313,6 +4332,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         _RESULT["older_catalog"] = list(older)
         print(f"served from older catalog: {len(older)} set{'s' if len(older) != 1 else ''}")
     errors = error_rows(failed, nav_kinds)
+    if _STAGE.get("code_only_gate"):
+        _RESULT["code_only_gate"] = [p.replace(str(Path.home()), "~") for p in _STAGE["code_only_gate"]]
     _RESULT.update(files=file_list, skills=skill_list, leans_none=leans, errors=errors,
                    unsearched=unsearched_rows(unsearched, state_of, healing), left_out=left_out_rows(edited_out, held))
     if why := SKILL_FAILED.pop(question, "") if skill_job else (
@@ -4340,7 +4361,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     _RESULT["left_out"] = left_out_rows(skipped + edited_out, held)
     ask_py = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal}"
     if failed or check_error or toc_error:
-        why = (f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
+        why = (CODE_ONLY_GATE_WHY if _STAGE.get("code_only_gate") and not failed
+               else f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
                else "no match, and the content check failed" if check_error
                else f"not found, but the {ZOOM_FAILED.format(reason=toc_error)}, so this may be a miss; ask again")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
