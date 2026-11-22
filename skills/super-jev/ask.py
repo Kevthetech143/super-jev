@@ -1837,6 +1837,59 @@ def split_passages(text: str) -> list:
         cuts.append(pos)
     return [text[a:b] for a, b in zip(cuts, cuts[1:] + [len(text)])]
 
+LOCAL_CHECK_FILES, LOCAL_CHECK_CHARS, LOCAL_CHECK_SECS = 3, 2000, 45
+LOCAL_CHECK_PROMPT = (
+    "Passage:\n\"\"\"\n{passage}\n\"\"\"\n\nQuestion: {q}\n\n"
+    "Copy, word for word, the one line or sentence of the passage that answers the question. "
+    "If no line of the passage gives the answer, reply with exactly: NONE")
+
+
+def local_passage(path: str, question: str) -> str:
+    """The ~LOCAL_CHECK_CHARS window of the file's text that carries the most of the question's words ("" if unreadable)."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")[:400_000]
+    except OSError:
+        return ""
+    terms = query_terms(question)
+    step = LOCAL_CHECK_CHARS // 4
+    starts = sorted({0, *(m.end() for m in re.finditer(r"\n", text) if m.end() % step < 80), max(0, len(text) - LOCAL_CHECK_CHARS)})
+    at = max(starts, key=lambda s: (term_hits(terms, text[s:s + LOCAL_CHECK_CHARS]), -s))
+    return text[at:at + LOCAL_CHECK_CHARS].strip()
+
+
+def local_verdict(url: str, question: str, path: str, passage: str):
+    """The line a small local model (an OpenAI-style chat endpoint you own) copies from the passage as the answer, or "" when
+    it says NONE or the copy is not in the passage; None when it could not say (down, slow). Never a judge: it only
+    may veto a word-match file, and only on a clear NONE."""
+    import urllib.request  # noqa: PLC0415
+    body = json.dumps({"messages": [{"role": "user", "content": LOCAL_CHECK_PROMPT.format(q=question, passage=passage)}],
+                       "max_tokens": 60, "temperature": 0}).encode()
+    try:
+        req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", body, {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=LOCAL_CHECK_SECS) as r:  # noqa: S310 -- the owner's own host
+            reply = (json.loads(r.read())["choices"][0]["message"]["content"] or "").strip()
+    except Exception:  # noqa: BLE001 -- no answer is no veto
+        return None
+    if not reply:
+        return None
+    copy = " ".join(reply.strip("-*\"' ").split())
+    # A copied line must really be in the passage (its first words, spacing and case aside): an invented line is no answer.
+    return "" if copy.upper().startswith("NONE") or " ".join(copy[:40].split()).casefold() not in " ".join(passage.split()).casefold() else reply
+
+
+def local_check(url: str, question: str, paths: list) -> dict:
+    """Ask the local model about the first LOCAL_CHECK_FILES paths, stopping at the first that states an answer.
+    {"quotes": {path: line | "" (none) | None (no verdict)}, "veto": bool}: veto only when every checked file got a clear
+    none (one answer, or one file it could not judge, keeps the list)."""
+    t0, out = time.time(), {}
+    for p in paths[:LOCAL_CHECK_FILES]:
+        passage = local_passage(p, question)
+        out[p] = None if not passage or has_secret(passage) else local_verdict(url, question, p, passage)  # a secret never leaves
+        if out[p]:
+            break
+    return {"quotes": out, "veto": bool(out) and all(v == "" for v in out.values()), "secs": round(time.time() - t0, 1)}
+
+
 def part_passages(lines: list, parts: list):
     """(parts, texts): each chosen part (name, start, end) whole, or, when longer than a passage, split by
     split_passages into passages that keep the part's name and carry their own line ranges. Never cut short."""
@@ -3626,6 +3679,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     _STAGE.clear()
     if context_setting.harness_only(sdir):  # this principal's settings.json: judge calls are refused at the door (judges.ask)
         os.environ["SUPERJEV_HARNESS_ONLY"] = "1"
+        if url := context_setting.local_check_url(sdir):
+            os.environ.setdefault("SUPERJEV_LOCAL_CHECK_URL", url)
     if os.environ.get("SUPERJEV_HARNESS_ONLY") == "1":
         _STAGE["harness_only"] = True
     # SUPERJEV_REPLAY=1 (paid_replay.py): answer live; never read a saved answer or claim verdict.
@@ -4186,6 +4241,13 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                     "lead_missing": (wsearch.get("miss") or {}).get(lead)}
         floor = HARNESS_PASSAGE_COVER if _STAGE.get("harness_only") else CODE_ONLY_PASSAGE_COVER
         if pc and pc.get(lead, 0) < floor and hc.get(lead, 0) < CODE_ONLY_HEAD_COVER:
+            _STAGE["code_only_gate"] = [p for _s, p, _ptr in top]
+            top = []
+    if top and _STAGE.get("harness_only") and (lurl := os.environ.get("SUPERJEV_LOCAL_CHECK_URL")):
+        # Words alone cannot tell a note on the topic from one that states the fact. A small local model reads the top
+        # files' best passages; only a clear NO on every one checked drops them (anything unclear keeps the list).
+        lc = _STAGE["local_check"] = local_check(lurl, question, [p for _s, p, _ptr in top])
+        if lc["veto"]:
             _STAGE["code_only_gate"] = [p for _s, p, _ptr in top]
             top = []
     if _CLAIM["text"]:

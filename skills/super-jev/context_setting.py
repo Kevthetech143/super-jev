@@ -130,6 +130,16 @@ def status_line(preset: str, source: str) -> str:
     return f"Context: {judge_profile.load(judge_profile.PROFILE.name, context=preset).context_label} ({WHERE[source]})"
 
 
+def local_check_url(sdir) -> str:
+    """settings.json `"local_check_url": "http://host:port"`: the owner's own local model that may veto a harness-only
+    word match (see ask.local_check). "" when unset."""
+    try:
+        v = json.loads((Path(sdir) / FILE).read_text()).get("local_check_url")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return v if isinstance(v, str) and v.startswith("http") else ""
+
+
 def harness_only(sdir) -> bool:
     """True when <sdir>/settings.json says `"harness_only": true`: this principal's asks make no judge call (word search
     and the code-only not-found gate answer alone). Anything else, or no file, is False: the judge is used as before."""
