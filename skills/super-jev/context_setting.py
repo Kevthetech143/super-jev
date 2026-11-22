@@ -128,3 +128,12 @@ def split_flag(args: list):
 def status_line(preset: str, source: str) -> str:
     """`Context: Medium (from --context)`: the line --status prints for the size in use."""
     return f"Context: {judge_profile.load(judge_profile.PROFILE.name, context=preset).context_label} ({WHERE[source]})"
+
+
+def harness_only(sdir) -> bool:
+    """True when <sdir>/settings.json says `"harness_only": true`: this principal's asks make no judge call (word search
+    and the code-only not-found gate answer alone). Anything else, or no file, is False: the judge is used as before."""
+    try:
+        return json.loads((Path(sdir) / FILE).read_text()).get("harness_only") is True
+    except (OSError, ValueError, AttributeError):
+        return False

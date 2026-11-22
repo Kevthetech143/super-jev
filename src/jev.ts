@@ -248,6 +248,8 @@ export class Jev implements Evaluator {
     return judgeTokens(request.state) + longest > p.baseCallTokens ? p.longContextHeader : null;
   }
   private async _post(request: Request, signal: AbortSignal, pin: JudgePin) {
+    // Harness-only (a principal's settings.json, read by ask.py): no judge call leaves the machine.
+    if (process.env.SUPERJEV_HARNESS_ONLY === '1') throw new Unreachable('harness-only: no judge call made', 'harness-only: no judge call made');
     const payload = { model: this.model, ...pin, ...request };
     // The one choke point for every TypeSafe send: scan the whole body first.
     if (payloadHasSecret(payload)) throw new SecretBlocked(`${this.profile.judgeName} request contains a secret; not sent`, 'request contains a secret; not sent');

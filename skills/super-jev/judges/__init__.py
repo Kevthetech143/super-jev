@@ -133,6 +133,8 @@ def _impl():
 def ask(state, questions, timeout=120):
     """One judge call for every question: {answers, model, chunks, input_tokens, latency_ms}.
     Raises a typed JudgeError on anything short of a usable answer; that is no verdict."""
+    if os.environ.get("SUPERJEV_HARNESS_ONLY") == "1":     # harness-only: no judge is called, nothing leaves the machine
+        raise Unreachable("harness-only: no judge call made")
     # The door scans for every judge, so no adapter can be handed a secret. An adapter may scan again.
     if str(_SKILL_DIR) not in sys.path:
         sys.path.insert(0, str(_SKILL_DIR))
