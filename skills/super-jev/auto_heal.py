@@ -639,10 +639,7 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
 
     cache_path = cache_dir / f"{pointer}.json"
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
-    if not new and not rc.changed_files(report, cache):
-        _log(principal=principal, pointer=pointer, action="skip", reason="no-change")
-        return "no-change"
-
+    # Cooldown first: it costs a state read, while changed_files hashes every file of the set.
     state = _load_state(principal)
     now = time.time()
     last = state["pointers"].get(pointer, 0)
@@ -651,6 +648,9 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
         _log(principal=principal, pointer=pointer, action="skip", reason="cooldown",
              wait_secs=round(wait))
         return "cooldown"
+    if not new and not rc.changed_files(report, cache):
+        _log(principal=principal, pointer=pointer, action="skip", reason="no-change")
+        return "no-change"
     kind = "new" if new else "refresh"
     if last and now - last < 3600 and any(p != pointer for p in state.get("pending") or {}):
         # Fair share of the cap: this pointer already healed this hour and another one is waiting,

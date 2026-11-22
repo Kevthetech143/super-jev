@@ -999,12 +999,17 @@ WORD_HITS, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.55
 # Without a judge, a word-search file is offered only when the question's words sit together in one of its passages
 # (share of the question's weighted words) or its name, heading and description carry most of them.
 CODE_ONLY_PASSAGE_COVER, CODE_ONLY_HEAD_COVER = 0.6, 0.5
+HARNESS_PASSAGE_COVER = 2 / 3  # harness-only: no judge to doubt a weak lead, so its passage must carry two thirds of the words
 CODE_ONLY_GATE_WHY = ("no match: no judge checked the word-search hits and they did not carry the question's words, "
                       "so the coverage check held them back (listed as code_only_gate); retry when the judge is up, "
                       "or read those hits yourself")
 CODE_ONLY_GATE_WHY_HARNESS = ("no match: harness-only mode, no judge check; the word-search hits did not carry the "
                               "question's words, so the coverage check held them back (listed as code_only_gate); "
                               "read those hits yourself")
+# Harness-only: words that say nothing about a note's topic ("number", "looks", "too", "low", "known", "quirk"...). With no
+# judge to refuse a weak match, they would let a file that merely shares them pass the coverage check.
+HARNESS_FILLER = {"number", "numbers", "look", "looks", "looking", "too", "low", "known", "quirk", "quirks", "see", "seen",
+                  "put", "yet", "missing", "left", "time", "times"}
 READ_MAX = zoom.KEEP_FILES + WORD_HITS  # most files one ask's content check reads: the zoom's picks plus the hits
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
 # Words are Unicode letters/digits, case- and accent-folded, so "¿Cuántas medicinas
@@ -1799,7 +1804,18 @@ def apply_near_twin_tiebreak(question: str, top: list) -> list:
 
 def query_terms(question: str) -> list:
     found = words(question.replace("'", "").replace("\u2019", ""))
-    return list(dict.fromkeys(w for w in found if len(w) > 2 and w not in QUERY_STOPWORDS))
+    skip = QUERY_STOPWORDS | HARNESS_FILLER if _STAGE.get("harness_only") else QUERY_STOPWORDS
+    return list(dict.fromkeys(w for w in found if len(w) > 2 and w not in skip))
+
+def singular_of(t: str) -> str:
+    """The singular of a plural-looking word ("taxes" -> "tax", "policies" -> "policy"), or "" when it is not one."""
+    if len(t) > 4 and t.endswith("ies"):
+        return t[:-3] + "y"
+    if len(t) > 4 and t.endswith(("sses", "xes", "zes", "ches", "shes")):
+        return t[:-2]
+    if len(t) > 3 and t.endswith("s") and not t.endswith(("ss", "us", "is")):
+        return t[:-1]
+    return ""
 
 def term_hits(terms: list, text: str) -> int:
     """How many terms appear in text, a term also matching by its first five letters."""
@@ -2729,7 +2745,7 @@ def fts_pick(idx, question: str, pointers: list, who, out_of_scope_fn):
         return None, "no question words"
     try:
         who = sorted(who)
-        variants = idx.fts_variants(terms, SYNONYMS)
+        variants = idx.fts_variants(terms, SYNONYMS, singular_of if _STAGE.get("harness_only") else None)
         df = {t: idx.fts_df("body : (" + _fts_q(v) + ")", pointers, who) if v else 0 for t, v in variants.items()}
         allv = set().union(*variants.values())
         wtop = idx.fts_top("body : (" + _fts_q(allv) + ")", pointers, FTS_K, who) if allv else []
@@ -2955,13 +2971,17 @@ def _valid_item(item, sha) -> bool:
 
 def term_variants(terms: list, vocab) -> dict:
     """{term: the vocabulary words that count as that term} (close spellings, stem/ending forms, synonyms)."""
-    out = {}
+    out, vset = {}, None
     for t in terms:
         near = set(difflib.get_close_matches(t, vocab, n=3, cutoff=0.8)) if len(t) > 3 else set()
         stem = t[:5] if len(t) > 5 else t  # long words by stem, short ones plus an ending (owe/owed)
         out[t] = near | {v for v in vocab if v.startswith(stem) and len(v) - len(t) <= (99 if len(t) > 5 else 2)}
         # A synonym counts as a match for its source word, not as an extra word.
         out[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
+        if _STAGE.get("harness_only") and (one := singular_of(t)):  # harness-only: "taxes" finds "tax"
+            vset = vset or set(vocab)
+            if one in vset:
+                out[t].add(one)
     return out
 
 CYCLE_SCRIPT = Path(__file__).resolve().parent.parent / "super-jev-build-cycle" / "build_cycle.py"
@@ -3140,7 +3160,8 @@ def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), 
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
                       "ranked": ranked[:STAGE_LIST_CAP], "all": ranked,
                       "cover": {p: sum(idf[t] for t in terms if f[t]) / total for p, f in tf.items()},
-                      "pcover": pcover, "hcover": hcover}
+                      "pcover": pcover, "hcover": hcover, "dfs": dfs, "idf": {t: round(v, 2) for t, v in idf.items()},
+                      "miss": {p: [t for t in terms if not f[t]] for p, f in tf.items() if p in {r[1] for r in ranked[:10]}}}
     # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
     # Measured against the best file still eligible, i.e. after routed files are skipped.
     rest = [r for r in ranked if r[1] not in skip]
@@ -3728,7 +3749,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     older = []  # stale sets served from their last catalog: searched, so not counted as left out
     for ptr in original_pointers:
         benched, remaining, fails = pointer_benched(health, ptr, principal)
-        if benched:
+        if benched and not _STAGE.get("harness_only"):  # harness-only: nothing is called, so a set is never sick
             failed.append(ptr)
             error_lines.append(f"[{ptr}] benched ({fails} consecutive failures, cooling off {int(remaining)}s more)")
         else:
@@ -3863,6 +3884,10 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         navd = dict(zip(nav_ptrs, ThreadPoolExecutor(max_workers=min(len(nav_ptrs), NAV_CONCURRENCY)).map(nav, nav_ptrs))) if nav_ptrs else {}
     results = [navd[ptr] if ptr in navd else classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     # A set whose routing hit a TypeSafe network error is asked once more before it counts as not searched.
+    if _STAGE.get("harness_only"):
+        # The judge door is shut by design: a set that only Jev could have routed was not searched, but it did not fail.
+        _STAGE["harness_unrouted"] = [r[0] for r in results if "harness-only" in r[1]][:STAGE_LIST_CAP]
+        results = [(p, "no-candidates", [], e, True) if "harness-only" in k else (p, k, r, e, ok) for p, k, r, e, ok in results]
     again = [i for i, (ptr, kind, *_r) in enumerate(results) if not replay and is_network_error(kind, nav_kinds.get(ptr))]
     for i in again:
         results[i] = nav(results[i][0])
@@ -3932,7 +3957,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             heal_note = ""
             stale = bool(served) or auto_heal.is_stale_kind(kind)
             result = None
-            if stale and not replay:
+            if stale and not replay and not _STAGE.get("harness_only"):  # harness-only: no heal sweep from asks
                 result = auto_heal.heal_in_background(ptr, principal, view=ptr in view_pointers)
                 if result in ("started", "in-progress"):
                     healing.add(ptr)  # "no-recipe", "held", "manual": nothing is refreshing, so never claimed
@@ -3960,7 +3985,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                    + hint + heal_note + " [STALE]")
                 continue
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
-        elif not replay and auto_heal.held_edited(ptr):
+        elif not replay and not _STAGE.get("harness_only") and auto_heal.held_edited(ptr):
             # An edited held file is no registered source, so the set never reads stale: heal it anyway.
             # Same bounded admission; the answer above is unchanged and never waits.
             auto_heal.heal_in_background(ptr, principal, view=ptr in view_pointers)
@@ -4113,7 +4138,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     checked = set(to_check)
     if to_check:
         scores, partial, check_error, notes = confirm(question, to_check)
-        if check_error:
+        if check_error and not _STAGE.get("harness_only"):  # harness-only: no judge, so no content check: not an error
             error_lines.append(f"[content-check] error: {check_error}")
         # One source-evidence floor for all questions. Routing discovers candidates;
         # it cannot rescue a file the content check rejected. Unfinished checks
@@ -4153,7 +4178,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         wsearch = _STAGE.get("word") or {}
         pc, hc = wsearch.get("pcover") or {}, wsearch.get("hcover") or {}
         lead = top[0][1]  # the file a caller reads first must vouch for itself
-        if pc and pc.get(lead, 0) < CODE_ONLY_PASSAGE_COVER and hc.get(lead, 0) < CODE_ONLY_HEAD_COVER:
+        if _STAGE.get("harness_only"):
+            _STAGE["cover_gate"] = {"lead": lead, "pcover": round(pc.get(lead, 0), 3), "hcover": round(hc.get(lead, 0), 3),
+                                    "terms": wsearch.get("terms"), "dfs": wsearch.get("dfs"), "idf": wsearch.get("idf"),
+                                    "lead_missing": (wsearch.get("miss") or {}).get(lead)}
+        floor = HARNESS_PASSAGE_COVER if _STAGE.get("harness_only") else CODE_ONLY_PASSAGE_COVER
+        if pc and pc.get(lead, 0) < floor and hc.get(lead, 0) < CODE_ONLY_HEAD_COVER:
             _STAGE["code_only_gate"] = [p for _s, p, _ptr in top]
             top = []
     if _CLAIM["text"]:
@@ -4351,6 +4381,14 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # read, so it stays listed as unchecked (inspect it) and counts as a file not checked, never as found.
     unread = [p for p, note in notes.items() if note == INCONCLUSIVE]
     listed = bool([m for m in top if m[1] not in unread] or skills)
+    harness = bool(_STAGE.get("harness_only"))
+    if harness:
+        # Harness-only: the zoom and the content check need the judge, so toc_error and check_error are expected, not
+        # failures, and no file is ever read-checked. Files that passed the word-match coverage gate are the answer
+        # (tier unchecked, never confirmed); none left is a not-found. A set that truly failed or needs setup still
+        # reads as error or needs-setup below.
+        toc_error, check_error, unread = "", None, []
+        listed = bool(top or skills)
     # A claim that nothing settles takes its exit from how the search went, listed files or not: the judge's
     # confidence in the files it read must not decide whether a failed or stale set shows in the exit code.
     unsettled = bool(_CLAIM["text"]) and _CLAIM["word"] not in ("TRUE", "FALSE")
@@ -4361,6 +4399,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         if skills:
             parts.append(f"{len(skills)} skill suggestion{'s' if len(skills) != 1 else ''}")
         found = "; ".join(parts + ([ZOOM_FAILED.format(reason=toc_error)] if toc_error else []))
+        if harness:  # nothing was judged: never saved as a win
+            _RESULT["saved_now"] = False
+            return _done("found", found + " (word match, no judge check)" + (f"; partial: {sets} not searched" if n else ""))
         _RESULT["saved_now"] = autosave(principal, question, sdir, win)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
     if dropped and not listed:
@@ -4396,7 +4437,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         unchecked = {p for p, *_ in skipped + edited_out} | set(held) | set(unread)
         gone = (f"; partial: {len(unchecked)} file{'s' if len(unchecked) != 1 else ''} not checked ({gone}; "
                 f"see {ask_py} --status)") if gone else ""
-        rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
+        rc = _done("not-found", CODE_ONLY_GATE_WHY_HARNESS if harness and _STAGE.get("code_only_gate")
+                   else f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
                    f"no matching file (it may still exist){gone}",
                    f"{ask_py} --status" if unchecked else f"{ask_py} --trace-show last",
                    "none" if _CLAIM["text"] else "include" if unchecked else "connect")
