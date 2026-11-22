@@ -3885,8 +3885,10 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     results = [navd[ptr] if ptr in navd else classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     # A set whose routing hit a TypeSafe network error is asked once more before it counts as not searched.
     if _STAGE.get("harness_only"):
-        # The judge door is shut by design: a set that only Jev could have routed was not searched, but it did not fail.
-        _STAGE["harness_unrouted"] = [r[0] for r in results if "harness-only" in r[1]][:STAGE_LIST_CAP]
+        # The judge door is shut by design: a set that only Jev could have routed (it has no local file list, so word
+        # search cannot cover it either) was not searched, but it did not fail. Every outcome below says so.
+        unrouted = [r[0] for r in results if "harness-only" in r[1]]
+        _STAGE["harness_unrouted"], _STAGE["harness_unrouted_n"] = unrouted[:STAGE_LIST_CAP], len(unrouted)
         results = [(p, "no-candidates", [], e, True) if "harness-only" in k else (p, k, r, e, ok) for p, k, r, e, ok in results]
     again = [i for i, (ptr, kind, *_r) in enumerate(results) if not replay and is_network_error(kind, nav_kinds.get(ptr))]
     for i in again:
@@ -4382,6 +4384,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     unread = [p for p, note in notes.items() if note == INCONCLUSIVE]
     listed = bool([m for m in top if m[1] not in unread] or skills)
     harness = bool(_STAGE.get("harness_only"))
+    ur = _STAGE.get("harness_unrouted_n", 0) if harness else 0
+    ur_note = f"; partial: {ur} set{'s' if ur != 1 else ''} not searched (no local file list, and no judge to route it)" if ur else ""
     if harness:
         # Harness-only: the zoom and the content check need the judge, so toc_error and check_error are expected, not
         # failures, and no file is ever read-checked. Files that passed the word-match coverage gate are the answer
@@ -4401,7 +4405,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         found = "; ".join(parts + ([ZOOM_FAILED.format(reason=toc_error)] if toc_error else []))
         if harness:  # nothing was judged: never saved as a win
             _RESULT["saved_now"] = False
-            return _done("found", found + " (word match, no judge check)" + (f"; partial: {sets} not searched" if n else ""))
+            return _done("found", found + " (word match, no judge check)" + (f"; partial: {sets} not searched" if n else "") + ur_note)
         _RESULT["saved_now"] = autosave(principal, question, sdir, win)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
     if dropped and not listed:
@@ -4437,9 +4441,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         unchecked = {p for p, *_ in skipped + edited_out} | set(held) | set(unread)
         gone = (f"; partial: {len(unchecked)} file{'s' if len(unchecked) != 1 else ''} not checked ({gone}; "
                 f"see {ask_py} --status)") if gone else ""
-        rc = _done("not-found", CODE_ONLY_GATE_WHY_HARNESS if harness and _STAGE.get("code_only_gate")
-                   else f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
-                   f"no matching file (it may still exist){gone}",
+        rc = _done("not-found", (CODE_ONLY_GATE_WHY_HARNESS if harness and _STAGE.get("code_only_gate")
+                   else f"searched {len(original_pointers) - ur} set{'s' if len(original_pointers) - ur != 1 else ''}, "
+                   f"no matching file (it may still exist){gone}") + ur_note,
                    f"{ask_py} --status" if unchecked else f"{ask_py} --trace-show last",
                    "none" if _CLAIM["text"] else "include" if unchecked else "connect")
         _RESULT["searched"] = {"sets": len(original_pointers),

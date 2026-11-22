@@ -72,13 +72,35 @@ def test_a_set_only_the_judge_could_route_is_not_a_failure(tmp_path, monkeypatch
     rc, res = _lookup(tmp_path, GOOD_Q, [good], nav={"status": "error", "reason": "harness-only: no judge call made"},
                       monkeypatch=monkeypatch)
     assert res["outcome"] == "not-found" and rc == 1
+    # that set has no local file list, so word search could not cover it either: never a complete no-match
+    assert "partial: 1 set not searched" in res["why"] and "searched 0 sets" in res["why"]
 
 
-def test_judged_mode_is_unchanged(tmp_path, monkeypatch):
+def _second_note(tmp_path):
+    f = tmp_path / "pottery-club-glaze-log.md"
+    f.write_text("# Glaze log\nPottery club glaze recipes were tested last spring.\n")
+    return f
+
+
+def test_judged_mode_ranking_and_tiers_are_unchanged(tmp_path, monkeypatch):
+    # Same expectations hold on v1.0.145: judge stubbed to score two notes, the rest rejected.
+    good, others = _notes(tmp_path)
+    second = _second_note(tmp_path)
+    scores = {str(good): 0.9, str(second): 0.7}
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({p: scores.get(p, 0.1) for p in ps}, set(), None, {}))
+    rc, res = _lookup(tmp_path, GOOD_Q, [good, second, *others], harness=False, monkeypatch=monkeypatch)
+    assert rc == 0 and res["outcome"] == "found"
+    assert [f["path"] for f in res["files"]] == [str(good), str(second)]
+    assert [f["tier"] for f in res["files"]] == ["confirmed", "confirmed"]
+    assert "no judge check" not in res["why"] and "partial" not in res["why"]
+
+
+def test_judged_mode_with_the_judge_down_still_errors(tmp_path, monkeypatch):
     good, others = _notes(tmp_path)
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), "judge down", {p: ask.INCONCLUSIVE for p in ps}))
     rc, res = _lookup(tmp_path, GOOD_Q, [good, *others], harness=False, monkeypatch=monkeypatch)
-    assert res["outcome"] != "found" or "no judge check" not in res["why"]
+    assert res["outcome"] == "error" and rc == 3
+    assert "no judge check" not in res["why"] and "harness" not in res["why"]
 
 
 def test_filler_words_are_not_search_terms_in_harness_mode_only(monkeypatch):
