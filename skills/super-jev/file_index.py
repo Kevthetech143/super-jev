@@ -609,7 +609,7 @@ class FileIndex:
     def fts_vocab(self) -> list:
         return [r[0] for r in self.db.execute("SELECT word FROM fvocab")]
 
-    def fts_variants(self, terms, synonyms) -> dict:
+    def fts_variants(self, terms, synonyms, singular=None) -> dict:
         """ask.term_variants() over the stored vocabulary, without scanning it: close spellings are looked up by shared
         bigram (a ratio >= 0.8 spelling always shares one), stem forms by key range."""
         import difflib
@@ -627,6 +627,9 @@ class FileIndex:
             out[t] = near | {w for (w,) in self.db.execute("SELECT word FROM fvocab WHERE word>=? AND word<?", (stem, stem + "\U0010ffff"))
                              if len(w) - len(t) <= lim}
             out[t] |= {x for x in synonyms.get(t, []) if self.db.execute("SELECT 1 FROM fvocab WHERE word=?", (x,)).fetchone()}
+            one = singular(t) if singular else ""  # harness-only: the singular of a plural ("taxes" -> "tax")
+            if one and self.db.execute("SELECT 1 FROM fvocab WHERE word=?", (one,)).fetchone():
+                out[t].add(one)
         return out
 
     @staticmethod
