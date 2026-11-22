@@ -4420,7 +4420,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                else "no match, and the content check failed" if check_error
                else f"not found, but the {ZOOM_FAILED.format(reason=toc_error)}, so this may be a miss; ask again")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
-        rc = _done("error", why, f"{ask_py} --status", "key" if key else "none")
+        rc = _done("error", why + ur_note, f"{ask_py} --status", "key" if key else "none")
     elif stale_ptrs:
         first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
         why = "no match, but the search was incomplete: " + "; ".join(
@@ -4430,7 +4430,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                         f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "",
                         f"{len(unread)} file{'s' if len(unread) != 1 else ''} not read (content check failed or unfinished)"
                         if unread else "") if x)
-        rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh")
+        rc = _done("needs-setup", why + ur_note, first or f"{ask_py} --status", "refresh")
     else:
         # Files skipped at setup do not make a searched set a setup gap: the sets were searched.
         gone = "; ".join(x for x in (

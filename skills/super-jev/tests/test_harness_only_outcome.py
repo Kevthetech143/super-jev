@@ -144,3 +144,45 @@ def test_lead_passage_below_two_thirds_is_held_back_in_harness_mode(tmp_path, mo
     rc, res = _lookup(tmp_path, " ".join(words), files, monkeypatch=monkeypatch)
     assert 0.55 < ask._STAGE["cover_gate"]["pcover"] < 0.65
     assert res["outcome"] == "not-found" and rc == 1
+
+
+def _sets(tmp_path, monkeypatch, files, navs, question=GOOD_Q):
+    """p1 has local files (word-searched); every other set has none and its routing answers navs[name]."""
+    monkeypatch.setenv("SUPERJEV_HARNESS_ONLY", "1")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {} if ptr in navs else {
+        str(f): {"sha256": hashlib.sha256(f.read_bytes()).hexdigest(), "pass": True} for f in files})
+    monkeypatch.setattr(ask, "memory", lambda r: {"status": "miss"} if r["action"] == "cached" else
+                        {"pointers": ["p1", *navs]} if r["action"] == "panel" else
+                        navs.get(r.get("pointer"), {"status": "no-candidates"}))
+    monkeypatch.setattr(ask, "judge_listwise", lambda q, pool: (None, None))
+    sdir = tmp_path / "s2"
+    sdir.mkdir(exist_ok=True)
+    ask._RESULT.clear()
+    rc = ask.lookup(question, "me", sdir)
+    return rc, dict(ask._RESULT)
+
+
+UNROUTED = {"status": "error", "reason": "harness-only: no judge call made"}
+NOTE = "partial: 1 set not searched (no local file list, and no judge to route it)"
+
+
+def test_unrouted_set_is_disclosed_when_the_code_only_gate_holds_everything_back(tmp_path, monkeypatch):
+    good, others = _notes(tmp_path)
+    rc, res = _sets(tmp_path, monkeypatch, [good, *others], {"p2": UNROUTED}, question=FILLER_Q)
+    assert res["outcome"] == "not-found" and rc == 1 and NOTE in res["why"]
+
+
+def test_unrouted_set_is_disclosed_on_error(tmp_path, monkeypatch):
+    good, others = _notes(tmp_path)
+    # p3 truly fails (not a judge refusal): error, and the unrouted p2 is still named
+    rc, res = _sets(tmp_path, monkeypatch, [good, *others],
+                    {"p2": UNROUTED, "p3": {"status": "error", "reason": "disk gone"}}, question=FILLER_Q)
+    assert res["outcome"] == "error" and rc == 3
+    assert "1 set failed" in res["why"] and NOTE in res["why"]
+
+
+def test_unrouted_set_is_disclosed_on_needs_setup(tmp_path, monkeypatch):
+    good, others = _notes(tmp_path)
+    rc, res = _sets(tmp_path, monkeypatch, [good, *others],
+                    {"p2": UNROUTED, "p3": {"status": "preparation-required", "reason": "not prepared"}}, question=FILLER_Q)
+    assert res["outcome"] == "needs-setup" and rc == 4 and NOTE in res["why"]
