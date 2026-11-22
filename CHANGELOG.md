@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.147 — 2026-11-22
+
+- **Harness-only: an optional local answer check annotates, never vetoes.** When a local check is configured (it is off by default), its result is added as a note on the answer and never blocks or changes the outcome. Nothing changes for a principal that has not configured it (PR 417).
+
 ## 1.0.146 — 2026-11-22
 
 - **Harness-only asks (no judge) read honestly and run faster.** (1) The missing zoom and content check are expected, not errors: files that pass the word-match coverage check end `found - N files (word match, no judge check)` (exit 0, tier unchecked, never confirmed, never auto-saved); none left is `not-found` (exit 1); a set that truly failed or needs setup keeps `error` / `needs-setup`. Sets only the judge could have routed no longer count as failed or get benched. (2) A tighter gate for this mode only: filler words ("number", "looks", "too", "low", "known", "quirk", "see", "put", "yet", "missing", "left", "time"...) are not search terms, and the lead passage must carry two thirds of the question's words (was 0.6). (3) Speed: `auto_heal.maybe_heal` checks the cooldown before hashing the set's files, and asks in this mode start no heal sweep. (4) Plural stemming ("taxes" finds "tax"). Judged asks are unchanged apart from the cooldown order. Test: `skills/super-jev/tests/test_harness_only_outcome.py`.
