@@ -1841,7 +1841,8 @@ def split_passages(text: str) -> list:
         cuts.append(pos)
     return [text[a:b] for a, b in zip(cuts, cuts[1:] + [len(text)])]
 
-LOCAL_CHECK_FILES, LOCAL_CHECK_CHARS, LOCAL_CHECK_SECS = 3, 2000, 45
+LOCAL_CHECK_FILES, LOCAL_CHECK_CHARS, LOCAL_CHECK_SECS, LOCAL_CHECK_BUDGET = 3, 2000, 15, 15  # budget: all files of one ask
+_LOCAL_DEADLINE = [0.0]  # monotonic time the current ask's check budget ends (0 = no budget set)
 LOCAL_CHECK_PROMPT = (
     "Passage:\n\"\"\"\n{passage}\n\"\"\"\n\nQuestion: {q}\n\n"
     "Copy, word for word, the one line or sentence of the passage that answers the question. "
@@ -1863,22 +1864,27 @@ def local_passage(path: str, question: str) -> str:
 
 def local_verdict(url: str, question: str, path: str, passage: str):
     """The line a small local model (an OpenAI-style chat endpoint you own) copies from the passage as the answer, or "" when
-    it says NONE or the copy is not in the passage; None when it could not say (down, slow). Never a judge: it only
-    may annotate a word-match file; it never drops one."""
+    it says exactly NONE; None when it could not say (down, slow, junk, or a copy that is not whole in the passage).
+    The returned line is the verified copy, whitespace-normalized. Never a judge: it only annotates; it never drops a file."""
     import urllib.request  # noqa: PLC0415
     body = json.dumps({"messages": [{"role": "user", "content": LOCAL_CHECK_PROMPT.format(q=question, passage=passage)}],
                        "max_tokens": 60, "temperature": 0}).encode()
     try:
         req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", body, {"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=LOCAL_CHECK_SECS) as r:  # noqa: S310 -- the owner's own host
+        left = (_LOCAL_DEADLINE[0] - time.monotonic()) if _LOCAL_DEADLINE[0] else LOCAL_CHECK_SECS
+        if left <= 0:
+            return None
+        with urllib.request.urlopen(req, timeout=min(LOCAL_CHECK_SECS, left)) as r:  # noqa: S310 -- the owner's own host
             reply = (json.loads(r.read())["choices"][0]["message"]["content"] or "").strip()
     except Exception:  # noqa: BLE001 -- no verdict is no annotation
         return None
     if not reply:
         return None
     copy = " ".join(reply.strip("-*\"' ").split())
-    # A copied line must really be in the passage (its first words, spacing and case aside): an invented line is no answer.
-    return "" if copy.upper().startswith("NONE") or " ".join(copy[:40].split()).casefold() not in " ".join(passage.split()).casefold() else reply
+    if copy.rstrip(".").upper() == "NONE":
+        return ""  # only an explicit NONE says "no answering line"
+    # The WHOLE copied line must be in the passage (spacing and case aside); anything else is junk, so no verdict.
+    return copy if copy and copy.casefold() in " ".join(passage.split()).casefold() else None
 
 
 def local_check(url: str, question: str, paths: list) -> dict:
@@ -1886,11 +1892,16 @@ def local_check(url: str, question: str, paths: list) -> dict:
     {"quotes": {path: line | "" (none) | None (no verdict)}, "all_none": bool}: all_none only when every checked file got a clear
     none. Nothing here removes a file."""
     t0, out = time.time(), {}
+    _LOCAL_DEADLINE[0] = time.monotonic() + LOCAL_CHECK_BUDGET
     for p in paths[:LOCAL_CHECK_FILES]:
+        if time.monotonic() >= _LOCAL_DEADLINE[0]:
+            out[p] = None  # over budget: no verdict for the rest
+            continue
         passage = local_passage(p, question)
         out[p] = None if not passage or has_secret(passage) else local_verdict(url, question, p, passage)  # a secret never leaves
         if out[p]:
             break
+    _LOCAL_DEADLINE[0] = 0.0
     return {"quotes": out, "all_none": bool(out) and all(v == "" for v in out.values()), "secs": round(time.time() - t0, 1)}
 
 

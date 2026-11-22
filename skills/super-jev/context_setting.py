@@ -131,7 +131,7 @@ def status_line(preset: str, source: str) -> str:
 
 
 def local_check_url(sdir) -> str:
-    """settings.json `"local_check_url": "http://host:port"`: the owner's own local model that annotates (and may reorder) a harness-only
+    """settings.json `"local_check_url": "http://host:port"`: the owner's own local model that annotates a harness-only
     word match (see ask.local_check). "" when unset."""
     try:
         v = json.loads((Path(sdir) / FILE).read_text()).get("local_check_url")

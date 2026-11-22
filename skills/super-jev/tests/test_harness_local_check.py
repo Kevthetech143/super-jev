@@ -62,21 +62,55 @@ def test_off_by_default(tmp_path, monkeypatch):
     assert got == ["passport.md"] and not calls
 
 
-def test_a_copied_line_must_be_in_the_passage():
-    class R:
-        def __init__(s, c): s.c = c
-        def read(s): return json.dumps({"choices": [{"message": {"content": s.c}}]}).encode()
-        def __enter__(s): return s
-        def __exit__(s, *a): return False
+class _R:
+    def __init__(s, c): s.c = c
+    def read(s): return json.dumps({"choices": [{"message": {"content": s.c}}]}).encode()
+    def __enter__(s): return s
+    def __exit__(s, *a): return False
+
+
+def _verdict(reply, passage="Sam's passport renewal is due in May. It costs 130 dollars."):
     import urllib.request
-    passage = "Sam's passport renewal is due in May."
     orig = urllib.request.urlopen
     try:
-        urllib.request.urlopen = lambda *a, **k: R("Sam's passport number is 123456789")  # invented line
-        assert ask.local_verdict("http://x", "q", "/n.md", passage) == ""
-        urllib.request.urlopen = lambda *a, **k: R("Sam's passport renewal is due in May.")
-        assert ask.local_verdict("http://x", "q", "/n.md", passage)
-        urllib.request.urlopen = lambda *a, **k: R("NONE")
-        assert ask.local_verdict("http://x", "q", "/n.md", passage) == ""
+        urllib.request.urlopen = lambda *a, **k: _R(reply)
+        return ask.local_verdict("http://x", "q", "/n.md", passage)
     finally:
         urllib.request.urlopen = orig
+
+
+def test_the_whole_quote_must_be_in_the_passage():
+    assert _verdict("Sam's passport renewal is due in May.") == "Sam's passport renewal is due in May."
+    assert _verdict("Sam's  passport renewal\nis due in May.") == "Sam's passport renewal is due in May."  # spacing normalized
+    # first 40 chars real, tail invented: no verdict, never shown
+    assert _verdict("Sam's passport renewal is due in May and the number is 123456789") is None
+
+
+def test_only_an_explicit_none_means_no_answer():
+    assert _verdict("NONE") == "" and _verdict("none.") == ""
+    for junk in ("I cannot tell from this passage", "NONE of the lines say so, but maybe May", "{}", "???", "The passport"
+                 " is invented"):
+        assert _verdict(junk) is None
+
+
+def test_junk_reply_leaves_outcome_unchanged(tmp_path, monkeypatch):
+    base, bres, _c = _run("absent-value-missing", tmp_path, monkeypatch, lambda p, t: None)
+    assert "local check" not in bres["why"] and all("local_check" not in f for f in bres["files"])
+
+
+def test_budget_caps_total_time(monkeypatch, tmp_path):
+    import time as _t
+    paths = []
+    for i in range(3):
+        p = tmp_path / f"n{i}.md"
+        p.write_text("some note text about passports")
+        paths.append(str(p))
+    monkeypatch.setattr(ask, "LOCAL_CHECK_BUDGET", 0.05)
+    calls = []
+    def slow(u, q, path, passage):
+        calls.append(path)
+        _t.sleep(0.1)
+        return ""
+    monkeypatch.setattr(ask, "local_verdict", slow)
+    r = ask.local_check("http://x", "passport", paths)
+    assert len(calls) == 1 and list(r["quotes"].values()) == ["", None, None] and not r["all_none"]
