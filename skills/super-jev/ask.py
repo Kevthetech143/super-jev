@@ -1002,6 +1002,9 @@ CODE_ONLY_PASSAGE_COVER, CODE_ONLY_HEAD_COVER = 0.6, 0.5
 CODE_ONLY_GATE_WHY = ("no match: no judge checked the word-search hits and they did not carry the question's words, "
                       "so the coverage check held them back (listed as code_only_gate); retry when the judge is up, "
                       "or read those hits yourself")
+CODE_ONLY_GATE_WHY_HARNESS = ("no match: harness-only mode, no judge check; the word-search hits did not carry the "
+                              "question's words, so the coverage check held them back (listed as code_only_gate); "
+                              "read those hits yourself")
 READ_MAX = zoom.KEEP_FILES + WORD_HITS  # most files one ask's content check reads: the zoom's picks plus the hits
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
 # Words are Unicode letters/digits, case- and accent-folded, so "¿Cuántas medicinas
@@ -4366,7 +4369,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     _RESULT["left_out"] = left_out_rows(skipped + edited_out, held)
     ask_py = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal}"
     if failed or check_error or toc_error:
-        why = (CODE_ONLY_GATE_WHY if _STAGE.get("code_only_gate") and not failed
+        why = ((CODE_ONLY_GATE_WHY_HARNESS if _STAGE.get("harness_only") else CODE_ONLY_GATE_WHY)
+               if _STAGE.get("code_only_gate") and not failed
                else f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
                else "no match, and the content check failed" if check_error
                else f"not found, but the {ZOOM_FAILED.format(reason=toc_error)}, so this may be a miss; ask again")
