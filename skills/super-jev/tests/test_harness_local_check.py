@@ -1,5 +1,5 @@
 """Optional local-model check for harness-only asks (SUPERJEV_LOCAL_CHECK_URL). The model is faked here: these tests pin the
-rule around it (veto only on a clear NONE from every checked file; any answer, or no verdict, keeps the list; off by default)."""
+rule around it (annotate only: every file stays, in the same order; off by default)."""
 import importlib.util
 import json
 from pathlib import Path
@@ -30,25 +30,31 @@ def _run(cid, tmp_path, monkeypatch, verdict, url="http://127.0.0.1:1"):
 
 
 @pytest.mark.parametrize("cid", ["absent-neighbour-topic", "absent-value-missing"])
-def test_none_from_the_model_flips_the_known_gaps(cid, tmp_path, monkeypatch):
+def test_none_from_the_model_annotates_and_keeps_every_file(cid, tmp_path, monkeypatch):
+    base, _r, _c = _run(cid, tmp_path, monkeypatch, lambda p, t: None)
     got, res, calls = _run(cid, tmp_path, monkeypatch, lambda p, t: "")
-    assert got == [] and res["outcome"] == "not-found" and calls
+    assert got == base and got and res["outcome"] == "found" and calls
+    assert "local check found no answering line" in res["why"]
+    assert all(f["local_check"] == ask.LOCAL_NONE_NOTE for f in res["files"][:len(calls)])
 
 
-def test_an_answer_keeps_the_files(tmp_path, monkeypatch):
-    got, _res, _calls = _run("wrong-person", tmp_path, monkeypatch, lambda p, t: "Bob takes metformin every morning")
+def test_an_answer_is_quoted_and_keeps_the_files(tmp_path, monkeypatch):
+    got, res, _calls = _run("wrong-person", tmp_path, monkeypatch, lambda p, t: "Bob takes metformin every morning")
     assert got and got[0] == "bob-meds.md"
+    assert res["files"][0]["local_check"] == "answer line: Bob takes metformin every morning"
+    assert "local check found" not in res["why"]
 
 
-def test_one_answer_among_nones_keeps_the_list(tmp_path, monkeypatch):
+def test_order_is_never_changed(tmp_path, monkeypatch):
+    base, _r, _c = _run("hold-flag-kept", tmp_path, monkeypatch, lambda p, t: None)
     got, _res, _calls = _run("hold-flag-kept", tmp_path, monkeypatch,
                              lambda p, t: "Zeta prescription refill every 30 days" if "refill every" in t else "")
-    assert "zeta-hold.md" in got
+    assert "zeta-hold.md" in got and got == base
 
 
-def test_no_verdict_keeps_the_list(tmp_path, monkeypatch):  # model down or slow: today's behaviour, never a new refusal
-    got, _res, _calls = _run("absent-value-missing", tmp_path, monkeypatch, lambda p, t: None)
-    assert got == ["passport.md"]
+def test_no_verdict_adds_nothing(tmp_path, monkeypatch):  # model down or slow: today's behaviour
+    got, res, _calls = _run("absent-value-missing", tmp_path, monkeypatch, lambda p, t: None)
+    assert got == ["passport.md"] and "local_check" not in res["files"][0] and "no judge check" in res["why"]
 
 
 def test_off_by_default(tmp_path, monkeypatch):

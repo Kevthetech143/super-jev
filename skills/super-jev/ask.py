@@ -733,6 +733,8 @@ def file_row(score, path: str, pointer: str, tier: str) -> dict:
         row["no_span"] = why
     if _STAGE.get("word_question") and (sec := matched_section(path, _STAGE["word_question"], living_record(path))):
         row["section"] = sec  # the headed section that matched: callers read "file > section" instead of guessing
+    if note := local_note(path):
+        row["local_check"] = note
     n = ((_STAGE.get("checks") or {}).get(path) or {}).get("best_line")
     if isinstance(n, int) and n > 0:
         row["line"] = n
@@ -749,6 +751,8 @@ def show_file(f: dict) -> None:
     print(f"{score}  {where}  [{f['pointer']}]{note}")
     if f.get("section"):
         print(f"       section: {f['section']}")
+    if f.get("local_check"):
+        print(f"       {f['local_check']}")
     if f.get("no_span"):
         print(f"       {f['no_span']}")
 
@@ -1860,7 +1864,7 @@ def local_passage(path: str, question: str) -> str:
 def local_verdict(url: str, question: str, path: str, passage: str):
     """The line a small local model (an OpenAI-style chat endpoint you own) copies from the passage as the answer, or "" when
     it says NONE or the copy is not in the passage; None when it could not say (down, slow). Never a judge: it only
-    may veto a word-match file, and only on a clear NONE."""
+    may annotate a word-match file; it never drops one."""
     import urllib.request  # noqa: PLC0415
     body = json.dumps({"messages": [{"role": "user", "content": LOCAL_CHECK_PROMPT.format(q=question, passage=passage)}],
                        "max_tokens": 60, "temperature": 0}).encode()
@@ -1868,7 +1872,7 @@ def local_verdict(url: str, question: str, path: str, passage: str):
         req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", body, {"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=LOCAL_CHECK_SECS) as r:  # noqa: S310 -- the owner's own host
             reply = (json.loads(r.read())["choices"][0]["message"]["content"] or "").strip()
-    except Exception:  # noqa: BLE001 -- no answer is no veto
+    except Exception:  # noqa: BLE001 -- no verdict is no annotation
         return None
     if not reply:
         return None
@@ -1879,15 +1883,24 @@ def local_verdict(url: str, question: str, path: str, passage: str):
 
 def local_check(url: str, question: str, paths: list) -> dict:
     """Ask the local model about the first LOCAL_CHECK_FILES paths, stopping at the first that states an answer.
-    {"quotes": {path: line | "" (none) | None (no verdict)}, "veto": bool}: veto only when every checked file got a clear
-    none (one answer, or one file it could not judge, keeps the list)."""
+    {"quotes": {path: line | "" (none) | None (no verdict)}, "all_none": bool}: all_none only when every checked file got a clear
+    none. Nothing here removes a file."""
     t0, out = time.time(), {}
     for p in paths[:LOCAL_CHECK_FILES]:
         passage = local_passage(p, question)
         out[p] = None if not passage or has_secret(passage) else local_verdict(url, question, p, passage)  # a secret never leaves
         if out[p]:
             break
-    return {"quotes": out, "veto": bool(out) and all(v == "" for v in out.values()), "secs": round(time.time() - t0, 1)}
+    return {"quotes": out, "all_none": bool(out) and all(v == "" for v in out.values()), "secs": round(time.time() - t0, 1)}
+
+
+LOCAL_NONE_NOTE = "no answering line found (local check)"
+
+
+def local_note(path: str) -> str:
+    """The annotation line for a checked file ("" for one the model did not read or could not judge)."""
+    q = ((_STAGE.get("local_check") or {}).get("quotes") or {}).get(path)
+    return "" if q is None else (f"answer line: {' '.join(q.split())[:200]}" if q else LOCAL_NONE_NOTE)
 
 
 def part_passages(lines: list, parts: list):
@@ -4245,11 +4258,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             top = []
     if top and _STAGE.get("harness_only") and (lurl := os.environ.get("SUPERJEV_LOCAL_CHECK_URL")):
         # Words alone cannot tell a note on the topic from one that states the fact. A small local model reads the top
-        # files' best passages; only a clear NO on every one checked drops them (anything unclear keeps the list).
-        lc = _STAGE["local_check"] = local_check(lurl, question, [p for _s, p, _ptr in top])
-        if lc["veto"]:
-            _STAGE["code_only_gate"] = [p for _s, p, _ptr in top]
-            top = []
+        # files' best passages. It only ANNOTATES (answer line, or none found): no file is dropped or reordered (a
+        # round-4 reorder kept every gold in the top 5 but cost top-1), so the agent still opens the files and decides.
+        _STAGE["local_check"] = local_check(lurl, question, [p for _s, p, _ptr in top])
     if _CLAIM["text"]:
         top = apply_near_twin_tiebreak(question, top)
     # Listwise choice step: see judge_listwise.
@@ -4467,7 +4478,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         found = "; ".join(parts + ([ZOOM_FAILED.format(reason=toc_error)] if toc_error else []))
         if harness:  # nothing was judged: never saved as a win
             _RESULT["saved_now"] = False
-            return _done("found", found + " (word match, no judge check)" + (f"; partial: {sets} not searched" if n else "") + ur_note)
+            qs = (_STAGE.get("local_check") or {}).get("quotes") or {}
+            none = "; local check found no answering line" if qs and all(v == "" for v in qs.values()) else ", no judge check"
+            return _done("found", found + f" (word match{none})" + (f"; partial: {sets} not searched" if n else "") + ur_note)
         _RESULT["saved_now"] = autosave(principal, question, sdir, win)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
     if dropped and not listed:
