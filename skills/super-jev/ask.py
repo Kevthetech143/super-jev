@@ -733,6 +733,8 @@ def file_row(score, path: str, pointer: str, tier: str) -> dict:
         row["no_span"] = why
     if _STAGE.get("word_question") and (sec := matched_section(path, _STAGE["word_question"], living_record(path))):
         row["section"] = sec  # the headed section that matched: callers read "file > section" instead of guessing
+    if note := local_note(path):
+        row["local_check"] = note
     n = ((_STAGE.get("checks") or {}).get(path) or {}).get("best_line")
     if isinstance(n, int) and n > 0:
         row["line"] = n
@@ -749,6 +751,8 @@ def show_file(f: dict) -> None:
     print(f"{score}  {where}  [{f['pointer']}]{note}")
     if f.get("section"):
         print(f"       section: {f['section']}")
+    if f.get("local_check"):
+        print(f"       {f['local_check']}")
     if f.get("no_span"):
         print(f"       {f['no_span']}")
 
@@ -1836,6 +1840,81 @@ def split_passages(text: str) -> list:
         pos = min(ends, key=lambda i: abs(i - target)) if ends else target
         cuts.append(pos)
     return [text[a:b] for a, b in zip(cuts, cuts[1:] + [len(text)])]
+
+LOCAL_CHECK_FILES, LOCAL_CHECK_CHARS, LOCAL_CHECK_SECS, LOCAL_CHECK_BUDGET = 3, 2000, 15, 15  # budget: all files of one ask
+_LOCAL_DEADLINE = [0.0]  # monotonic time the current ask's check budget ends (0 = no budget set)
+LOCAL_CHECK_PROMPT = (
+    "Passage:\n\"\"\"\n{passage}\n\"\"\"\n\nQuestion: {q}\n\n"
+    "Copy, word for word, the one line or sentence of the passage that answers the question. "
+    "If no line of the passage gives the answer, reply with exactly: NONE")
+
+
+def local_passage(path: str, question: str) -> str:
+    """The ~LOCAL_CHECK_CHARS window of the file's text that carries the most of the question's words ("" if unreadable)."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")[:400_000]
+    except OSError:
+        return ""
+    terms = query_terms(question)
+    step = LOCAL_CHECK_CHARS // 4
+    starts = sorted({0, *(m.end() for m in re.finditer(r"\n", text) if m.end() % step < 80), max(0, len(text) - LOCAL_CHECK_CHARS)})
+    at = max(starts, key=lambda s: (term_hits(terms, text[s:s + LOCAL_CHECK_CHARS]), -s))
+    return text[at:at + LOCAL_CHECK_CHARS].strip()
+
+
+def local_verdict(url: str, question: str, path: str, passage: str):
+    """The line a small local model (an OpenAI-style chat endpoint you own) copies from the passage as the answer, or "" when
+    it says exactly NONE; None when it could not say (down, slow, junk, or a copy that is not whole in the passage).
+    The returned line is the verified copy, whitespace-normalized. Never a judge: it only annotates; it never drops a file."""
+    import urllib.request  # noqa: PLC0415
+    body = json.dumps({"messages": [{"role": "user", "content": LOCAL_CHECK_PROMPT.format(q=question, passage=passage)}],
+                       "max_tokens": 60, "temperature": 0}).encode()
+    try:
+        req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", body, {"Content-Type": "application/json"})
+        left = (_LOCAL_DEADLINE[0] - time.monotonic()) if _LOCAL_DEADLINE[0] else LOCAL_CHECK_SECS
+        if left <= 0:
+            return None
+        with urllib.request.urlopen(req, timeout=min(LOCAL_CHECK_SECS, left)) as r:  # noqa: S310 -- the owner's own host
+            reply = (json.loads(r.read())["choices"][0]["message"]["content"] or "").strip()
+    except Exception:  # noqa: BLE001 -- no verdict is no annotation
+        return None
+    if not reply:
+        return None
+    copy = " ".join(reply.strip("-*\"' ").split())
+    if copy.rstrip(".").upper() == "NONE":
+        return ""  # only an explicit NONE says "no answering line"
+    # The WHOLE copied line must be in the passage (spacing and case aside); anything else is junk, so no verdict.
+    if len(copy) < 20 or len(copy.split()) < 3:
+        return None  # too short to be a line that answers anything (a bare word or number matches by chance)
+    return copy if copy.casefold() in " ".join(passage.split()).casefold() else None
+
+
+def local_check(url: str, question: str, paths: list) -> dict:
+    """Ask the local model about the first LOCAL_CHECK_FILES paths, stopping at the first that states an answer.
+    {"quotes": {path: line | "" (none) | None (no verdict)}, "all_none": bool}: all_none only when every checked file got a clear
+    none. Nothing here removes a file."""
+    t0, out = time.time(), {}
+    _LOCAL_DEADLINE[0] = time.monotonic() + LOCAL_CHECK_BUDGET
+    for p in paths[:LOCAL_CHECK_FILES]:
+        if time.monotonic() >= _LOCAL_DEADLINE[0]:
+            out[p] = None  # over budget: no verdict for the rest
+            continue
+        passage = local_passage(p, question)
+        out[p] = None if not passage or has_secret(passage) else local_verdict(url, question, p, passage)  # a secret never leaves
+        if out[p]:
+            break
+    _LOCAL_DEADLINE[0] = 0.0
+    return {"quotes": out, "all_none": bool(out) and all(v == "" for v in out.values()), "secs": round(time.time() - t0, 1)}
+
+
+LOCAL_NONE_NOTE = "no answering line found (local check)"
+
+
+def local_note(path: str) -> str:
+    """The annotation line for a checked file ("" for one the model did not read or could not judge)."""
+    q = ((_STAGE.get("local_check") or {}).get("quotes") or {}).get(path)
+    return "" if q is None else (f"answer line: {' '.join(q.split())[:200]}" if q else LOCAL_NONE_NOTE)
+
 
 def part_passages(lines: list, parts: list):
     """(parts, texts): each chosen part (name, start, end) whole, or, when longer than a passage, split by
@@ -3626,6 +3705,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     _STAGE.clear()
     if context_setting.harness_only(sdir):  # this principal's settings.json: judge calls are refused at the door (judges.ask)
         os.environ["SUPERJEV_HARNESS_ONLY"] = "1"
+        if url := context_setting.local_check_url(sdir):
+            os.environ.setdefault("SUPERJEV_LOCAL_CHECK_URL", url)
     if os.environ.get("SUPERJEV_HARNESS_ONLY") == "1":
         _STAGE["harness_only"] = True
     # SUPERJEV_REPLAY=1 (paid_replay.py): answer live; never read a saved answer or claim verdict.
@@ -4188,6 +4269,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         if pc and pc.get(lead, 0) < floor and hc.get(lead, 0) < CODE_ONLY_HEAD_COVER:
             _STAGE["code_only_gate"] = [p for _s, p, _ptr in top]
             top = []
+    if top and _STAGE.get("harness_only") and (lurl := os.environ.get("SUPERJEV_LOCAL_CHECK_URL")):
+        # Words alone cannot tell a note on the topic from one that states the fact. A small local model reads the top
+        # files' best passages. It only ANNOTATES (answer line, or none found): no file is dropped or reordered (a
+        # round-4 reorder kept every gold in the top 5 but cost top-1), so the agent still opens the files and decides.
+        _STAGE["local_check"] = local_check(lurl, question, [p for _s, p, _ptr in top])
     if _CLAIM["text"]:
         top = apply_near_twin_tiebreak(question, top)
     # Listwise choice step: see judge_listwise.
@@ -4405,7 +4491,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         found = "; ".join(parts + ([ZOOM_FAILED.format(reason=toc_error)] if toc_error else []))
         if harness:  # nothing was judged: never saved as a win
             _RESULT["saved_now"] = False
-            return _done("found", found + " (word match, no judge check)" + (f"; partial: {sets} not searched" if n else "") + ur_note)
+            qs = (_STAGE.get("local_check") or {}).get("quotes") or {}
+            none = "; local check found no answering line" if qs and all(v == "" for v in qs.values()) else ", no judge check"
+            return _done("found", found + f" (word match{none})" + (f"; partial: {sets} not searched" if n else "") + ur_note)
         _RESULT["saved_now"] = autosave(principal, question, sdir, win)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
     if dropped and not listed:
