@@ -1884,7 +1884,9 @@ def local_verdict(url: str, question: str, path: str, passage: str):
     if copy.rstrip(".").upper() == "NONE":
         return ""  # only an explicit NONE says "no answering line"
     # The WHOLE copied line must be in the passage (spacing and case aside); anything else is junk, so no verdict.
-    return copy if copy and copy.casefold() in " ".join(passage.split()).casefold() else None
+    if len(copy) < 20 or len(copy.split()) < 3:
+        return None  # too short to be a line that answers anything (a bare word or number matches by chance)
+    return copy if copy.casefold() in " ".join(passage.split()).casefold() else None
 
 
 def local_check(url: str, question: str, paths: list) -> dict:

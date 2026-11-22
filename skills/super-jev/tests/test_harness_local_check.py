@@ -86,6 +86,12 @@ def test_the_whole_quote_must_be_in_the_passage():
     assert _verdict("Sam's passport renewal is due in May and the number is 123456789") is None
 
 
+def test_a_very_short_quote_is_no_verdict():
+    p = "Sam's passport renewal is due in May. Fee 130 dollars. Ok."
+    assert _verdict("May", p) is None and _verdict("130 dollars", p) is None  # under 20 chars / 3 words
+    assert _verdict("Fee 130 dollars. Ok.", p)  # 20 chars, 4 words: kept
+
+
 def test_only_an_explicit_none_means_no_answer():
     assert _verdict("NONE") == "" and _verdict("none.") == ""
     for junk in ("I cannot tell from this passage", "NONE of the lines say so, but maybe May", "{}", "???", "The passport"
