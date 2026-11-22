@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.145 — 2026-11-22
+
 - **Per-principal harness-only switch.** `"harness_only": true` in a principal's `settings.json` makes that principal's asks run with no judge call (word search and the code-only gate only); traces record `harness_only`. Other principals are unchanged. A miss under it says there is no judge check instead of "retry when the judge is up" (PR 411).
 - **Not found for a person the asker holds nothing about.** A question that names another agent's person folder (a PROFILE with a non-self Relation line, found in any prepare-cache on the machine) when the asking agent has none of that person's files now ends `not-found - not found for <name>` before any search, instead of confirming the asker's own files about someone else. Only a capitalised name (not the first word) or a possessive (`Name's`, straight or curly) counts, never a lowercase word or a word after the/our/its/my/his/her/a/an; a multi-word folder (`first-last`) matches its full name or its first word. The owner (`self`) never counts.
 - **Run folders rank below the notes they produced.** A build-cycle run folder (two or more of the cycle's own step receipts, names read from the cycle script's step list) is one job's working record: its files take only the word-search read slots left over and no longer set the weak-match floor, so the note or skill the job wrote is read first. A numbered guide folder (`01-intro.md`, `02-setup.md`) is not one.
