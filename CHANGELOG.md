@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.148 — 2026-11-23
+
+- **Harness-only asks run faster (no change to answers).** In harness-only mode the content check no longer spawns a navigation process (the judge door is shut, so every readable file ended unchecked anyway; held-secret handling is unchanged), and the stat memo reads one path by key instead of loading the whole table on every ask. Tests: `skills/super-jev/tests/test_harness_check_each.py`, `skills/super-jev/tests/test_stat_memo_lookup.py` (PR 420).
+
 ## 1.0.147 — 2026-11-22
 
 - **Harness-only: an optional local answer check annotates, never vetoes.** When a local check is configured (it is off by default), its result is added as a note on the answer and never blocks or changes the outcome. Nothing changes for a principal that has not configured it (PR 417).
