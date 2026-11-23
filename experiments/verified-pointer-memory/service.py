@@ -1204,7 +1204,14 @@ class Service:
     def _visible_pointers(self, principal: str) -> list[str]:
         """Names of registered pointers this principal is included in, name-sorted."""
         with self.connect() as c:
-            rows = c.execute('SELECT name, body FROM pointers ORDER BY name').fetchall()
+            try:  # the principals list is read inside SQLite: no pointer body is parsed here
+                rows = c.execute(
+                    "SELECT name FROM pointers WHERE json_type(body, '$.principals') = 'array' AND EXISTS "
+                    "(SELECT 1 FROM json_each(body, '$.principals') WHERE value = ?) ORDER BY name",
+                    (principal,)).fetchall()
+                return [name for (name,) in rows]
+            except sqlite3.OperationalError:  # no JSON functions in this SQLite build
+                rows = c.execute('SELECT name, body FROM pointers ORDER BY name').fetchall()
         return [name for name, body in rows
                 if principal in json.loads(body).get('principals', [])]
 

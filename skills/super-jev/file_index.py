@@ -67,6 +67,7 @@ class StatSha:
         import threading
         self.path = Path(db_path)
         self.rows, self.pending, self.loaded = {}, {}, False
+        self.db = None  # read connection, opened on the first lookup and shared under the lock
         self.lock = threading.Lock()
 
     @staticmethod
@@ -74,28 +75,31 @@ class StatSha:
         st = os.stat(path)
         return (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
 
-    def _load(self):
-        if self.loaded:
-            return
-        self.loaded = True
-        if not self.path.is_file():
-            return
-        try:
-            db = sqlite3.connect(str(self.path), timeout=5)
+    def _lookup(self, path):
+        """The memo's row for one path (read by its key, never the whole table: it holds a row per file ever seen)."""
+        if self.db is None and not self.loaded:
+            self.loaded = True
             try:
-                for r in db.execute("SELECT path,size,mtime_ns,ctime_ns,ino,sha256 FROM statsha"):
-                    self.rows[r[0]] = (r[1:5], r[5])
-            finally:
-                db.close()
+                if self.path.is_file():
+                    self.db = sqlite3.connect(str(self.path), timeout=5, check_same_thread=False)
+            except sqlite3.Error:
+                self.db = None  # no memo yet: every file is read once
+        if self.db is None:
+            return None
+        try:
+            r = self.db.execute("SELECT size,mtime_ns,ctime_ns,ino,sha256 FROM statsha WHERE path=?", (path,)).fetchone()
         except sqlite3.Error:
-            pass  # no memo yet: every file is read once
+            return None
+        return (r[:4], r[4]) if r else None
 
     def get(self, path):
         """(key, sha or None): the memoized sha when the file's stat still matches, else None."""
         k = self.key(path)  # OSError (gone / unreadable) goes to the caller, as a read would
         with self.lock:
-            self._load()
             hit = self.rows.get(path)
+            if hit is None:
+                hit = self.rows[path] = self._lookup(path) or False
+        hit = hit or None
         return k, (hit[1] if hit and hit[0] == k else None)
 
     def put(self, path, k, sha):

@@ -2560,7 +2560,12 @@ def engine_visible(principal: str):
         target = _engine_target()
         db = _engine_module(target[0]).load_config(target[1])["db"]
         with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)) as c:
-            return {n for n, b in c.execute("SELECT name, body FROM pointers") if principal in json.loads(b).get("principals", [])}
+            try:  # the principals list is read inside SQLite: no pointer body is parsed here
+                return {n for (n,) in c.execute(
+                    "SELECT name FROM pointers WHERE json_type(body, '$.principals') = 'array' AND EXISTS "
+                    "(SELECT 1 FROM json_each(body, '$.principals') WHERE value = ?)", (principal,))}
+            except sqlite3.OperationalError:  # no JSON functions in this SQLite build
+                return {n for n, b in c.execute("SELECT name, body FROM pointers") if principal in json.loads(b).get("principals", [])}
     except Exception:  # noqa: BLE001
         return None
 
@@ -2570,6 +2575,12 @@ def engine_generations():
         target = _engine_target()
         db = _engine_module(target[0]).load_config(target[1])["db"]
         with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)) as c:
+            try:  # a text generation is read inside SQLite; a body that holds anything else is parsed as before
+                got = {n: g for n, g in c.execute("SELECT name, json_extract(body, '$.generation') FROM pointers")}
+                if all(g is None or isinstance(g, str) for g in got.values()):
+                    return got
+            except sqlite3.OperationalError:  # no JSON functions in this SQLite build
+                pass
             return {n: json.loads(b).get("generation") for n, b in c.execute("SELECT name, body FROM pointers")}
     except Exception:  # noqa: BLE001
         return None
@@ -3262,9 +3273,13 @@ def confirm(question: str, paths: list):
     note_fallback(paths, results)
     return confirm_results(paths, results)
 
+HARNESS_NO_CHECK = "harness-only: no judge call made"
+
 def check_each(question: str, paths: list) -> list:
     """Each path's confirm_one answer: file by file, or with every file's check in one batched run (SUPERJEV_BATCH_JEV=0 keeps the
     first). A file whose read at a bigger size failed has been sent again at small (fall_back) by the time this returns."""
+    if _STAGE.get("harness_only"):  # the judge door is shut: every readable file ends unchecked, so spawn nothing
+        return [done or (None, ctx["partial"], HARNESS_NO_CHECK, None) for done, ctx in (confirm_start(question, p) for p in paths)]
     if not batch_jev():
         return list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
     # Every file's check rides in one navigation-cli run: their Jev questions share
