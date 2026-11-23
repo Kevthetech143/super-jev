@@ -3262,9 +3262,13 @@ def confirm(question: str, paths: list):
     note_fallback(paths, results)
     return confirm_results(paths, results)
 
+HARNESS_NO_CHECK = "harness-only: no judge call made"
+
 def check_each(question: str, paths: list) -> list:
     """Each path's confirm_one answer: file by file, or with every file's check in one batched run (SUPERJEV_BATCH_JEV=0 keeps the
     first). A file whose read at a bigger size failed has been sent again at small (fall_back) by the time this returns."""
+    if _STAGE.get("harness_only"):  # the judge door is shut: every readable file ends unchecked, so spawn nothing
+        return [done or (None, ctx["partial"], HARNESS_NO_CHECK, None) for done, ctx in (confirm_start(question, p) for p in paths)]
     if not batch_jev():
         return list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
     # Every file's check rides in one navigation-cli run: their Jev questions share
