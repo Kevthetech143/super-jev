@@ -237,6 +237,7 @@ import auto_heal  # noqa: E402
 import judges  # noqa: E402
 import toc_search  # noqa: E402
 import zoom  # noqa: E402
+import semantic  # noqa: E402
 import judge_profile  # noqa: E402
 import context_setting  # noqa: E402
 import refresh_changed  # noqa: E402
@@ -2812,6 +2813,55 @@ def toc_match(terms) -> str:
     tq = sorted({t[:5] if len(t) > 5 else t for t in terms})
     return "toc : (" + " OR ".join(f'"{q}"*' for q in tq) + ")" if tq else ""
 
+# EXPERIMENT, off unless SUPERJEV_SEMANTIC=1 (A/B: no net gain, see the PR). Meaning search (semantic.py), harness-only asks only: files whose stored vectors are nearest the question are ADDED
+# behind the word hits. A word hit is never dropped from the list or moved ahead of another word hit; the last
+# SEM_SLOTS places of the five go to the nearest meaning hits that are not already listed. With no word hit at all the
+# ask stays "not found": meaning alone never makes a found.
+SEM_K, SEM_SLOTS, SEM_MIN = 8, int(os.environ.get("SUPERJEV_SEMANTIC_SLOTS", "1")), 0.30
+
+def semantic_extra(idx, sdir: Path, question: str, pointers: list, who, out_of_scope_fn, reads, fallback_paths=()) -> list:
+    """[(0.0, path, pointer)] of meaning hits, nearest first, each held to the same rules as a word hit: inside the
+    searched sets and the asker's person scope, not test material, its stored vector made from the reviewed bytes
+    (sha), no secret flag, and its bytes on disk still those bytes. [] when meaning search is off or unavailable."""
+    if os.environ.get("SUPERJEV_SEMANTIC") != "1" or not _STAGE.get("harness_only"):  # experiment: opt-in, off by default
+        return []
+    t0 = time.time()
+    try:
+        hits = semantic.search(sdir, question, SEM_K, SEM_MIN)
+        if not hits:
+            _STAGE["semantic"] = {"hits": 0, "secs": round(time.time() - t0, 2)}
+            return []
+        by = {p: (cos, sha) for p, cos, sha in hits}
+        allowed = idx.fts_in_scope(list(by), pointers, who) | (set(by) & set(fallback_paths))  # fallback sets: the ask's own file list
+        names = {p: connector_names(p) for p in pointers}
+        out = []
+        for ptr, path, entry, item, _trow in idx.fts_rows(list(by)):
+            if path not in allowed or out_of_scope_fn(path) or prepare_bulk.is_test_material(
+                    path, prepare_bulk.named_exactly(Path(path).name, names.get(ptr, []))):
+                continue
+            sha = entry.get("sha256")
+            if sha != by[path][1] or not _valid_item(item, sha) or item.get("secret") or sha_of(path, reads) != sha:
+                continue
+            out.append((by[path][0], path, ptr))
+        out.sort(key=lambda m: (-m[0], m[1]))
+        _STAGE["semantic"] = {"hits": len(hits), "usable": [{"path": p, "cos": round(c, 3)} for c, p, _ in out],
+                              "secs": round(time.time() - t0, 2)}
+        return [(0.0, p, ptr) for _c, p, ptr in out]
+    except Exception as e:  # noqa: BLE001 -- optional: any failure is "no meaning hits"
+        _STAGE["semantic"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+        return []
+
+def with_semantic(merged: list, extra: list) -> list:
+    """The ask's top five: the word hits in their order, the last places going to meaning hits not already in them."""
+    top = merged[:5]
+    if not top or not extra:
+        return top
+    have = {p for _s, p, _ptr in top}
+    add = [m for m in extra if m[1] not in have][:SEM_SLOTS]
+    if add:
+        _STAGE.setdefault("semantic", {})["added"] = [p for _s, p, _ptr in add]
+    return top[:5 - len(add)] + add
+
 def fts_pick(idx, question: str, pointers: list, who, out_of_scope_fn):
     """The O(K) read path: (candidates [(ptr, path, entry)], items {path: word item}, toc rows, fts numbers for
     word_search, trace), or (None, why) to run the S3a path. Takes the top FTS_K files by bm25 on the question's
@@ -2900,6 +2950,29 @@ def _checked_pass(principal: str, sdir: Path) -> int:
             pass  # a stamp that will not go must not fail a pass that succeeded
     return rc
 
+SEM_BUILD_SECS = 1500  # one updater pass embeds for at most this long; the next pass resumes (vectors are saved as it goes)
+
+def semantic_pass(sdir: Path, cands: list, widx: dict) -> str:
+    """Updater step for meaning search: embed the reviewed files that are new or changed (one vector set per sha), drop the
+    ones that left. Only files whose word item is valid and carries no secret flag. A no-op unless this principal runs
+    harness-only (or SUPERJEV_SEMANTIC=1) and the model files and onnxruntime are there. Returns a short note for the log."""
+    if os.environ.get("SUPERJEV_SEMANTIC") != "1":  # experiment: opt-in, off by default
+        return ""
+    if not semantic.ready():
+        return "meaning search: model not installed (python3 semantic.py --fetch)"
+    entries = []
+    for _ptr, path, entry in cands:
+        sha, item = entry.get("sha256"), widx.get(path)
+        if _valid_item(item, sha) and not item.get("secret"):
+            entries.append((path, sha))
+    shas = dict(entries)
+    def read_text(path):
+        got = read_sha(path, None)
+        return clean_text(got[0].decode("utf-8", "replace"), path) if got and got[1] == shas.get(path) else None
+    t0 = time.time()
+    r = semantic.update(sdir, entries, read_text, deadline=t0 + SEM_BUILD_SECS)
+    return f"meaning search: {r.get('built', 0)} embedded, {r.get('kept', 0)} kept, {r.get('pending', 0)} pending, {round(time.time() - t0)}s"
+
 def _index_sync(principal: str, sdir: Path) -> int:
     from file_index import FileIndex
     panel = memory({"action": "panel", "principal": principal})
@@ -2973,6 +3046,11 @@ def _index_sync(principal: str, sdir: Path) -> int:
         toc.save({p for _ptr, p, _e in allc})
         fts_changed = index_fts_pass(idx, [r["pointer"] for r in rows], widx, toc)
         idx.compact()
+        try:
+            if note := semantic_pass(sdir, cands, widx):
+                say(note)
+        except Exception as e:  # noqa: BLE001 -- meaning search is optional: it never fails the index pass
+            say(f"meaning search skipped: {type(e).__name__}: {str(e)[:120]}")
     finally:
         idx.close()  # a stopped run drops its open transaction; what it committed stays
     print(f"index updated: {len(rows)} pointer(s), {hashed} file(s) hashed, {fts_changed} fts file(s) written")
@@ -4100,6 +4178,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     reads = {}  # one read+sha pass shared by edited_held and word_search
     use_stat_memo(principal)  # ...and a stat-keyed memo across asks: an unchanged file is not re-read
     icands, fitems, ftocs, fts_nums, fb_paths, vouched = None, None, None, None, set(), set()
+    sem_extra = []  # meaning hits (harness-only): added behind the word hits at the top-five cut
     held_ix = []  # the index's held rows (reviewed bytes the secret scan now holds) of the sets it serves
     if idx_read:
         try:
@@ -4147,6 +4226,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 if fts_nums:
                     fts_nums["local"] = set(fts_nums["local"]) | fb_paths  # scored with the shortlist, like the edited files
                 edited = edited_held(fb_ptrs, fb_out, reads)
+            if fts_nums:
+                sem_extra = semantic_extra(idx_read, sdir, question, ix_ptrs, who, other_person, reads, fb_paths)
         except sqlite3.Error as e:  # locked by the updater, damaged: today's path answers this ask
             idx_read, index_fb = index_failed(idx_read, e), {}
             icands = fitems = ftocs = fts_nums = None
@@ -4258,7 +4339,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                   if p in candidates and notes.get(p) not in (HELD_SECRET, INCONCLUSIVE)]
         merged.sort(key=lambda item: (scores.get(item[1], 0), route.get(item[1], 0)), reverse=True)
         possible.update({p: POSSIBLE_NOTE for _s, p, _ptr in merged})
-    top = merged[:5]
+    top = with_semantic(merged, sem_extra)
     if top and not route and not _CLAIM["text"] and not replay and to_check and all(notes.get(p) == INCONCLUSIVE for p in to_check):
         # No judge answered a single check and no routing answered either (true code-only): nothing vouches for these files but the word search, so it must vouch
         # alone. A best file whose passages and head do not carry the question's words is no answer: say not found.
@@ -4373,6 +4454,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                         for ptr, kind, rows, _elapsed, _ok in results},
             "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
             "stale_held": edited_paths[:STAGE_LIST_CAP],
+            "semantic": _STAGE.get("semantic"),
             "word_search": {"terms": wsearch.get("terms"), "files_searched": wsearch.get("files_searched"),
                             "changed_since_connect": sorted(set(_STAGE.get("word_changed") or [])
                                                             | set(_STAGE.get("stale_changed") or [])),

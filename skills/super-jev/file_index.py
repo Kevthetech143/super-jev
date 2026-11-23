@@ -652,6 +652,16 @@ class FileIndex:
             a += list(who)
         return sql, a
 
+    def fts_in_scope(self, paths, pointers, who=()) -> set:
+        """The given indexed paths that sit inside the searched pointers and the asker's person scope."""
+        s, a = self._scope(pointers, who)
+        out, paths = set(), list(paths)
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            out |= {r[0] for r in self.db.execute(
+                f"SELECT m.path FROM fts_map m WHERE m.path IN ({','.join('?' * len(chunk))})" + s, [*chunk, *a])}
+        return out
+
     def fts_stats_for(self, pointers, who=()) -> dict:
         """Global counts over the searched pointers (and the resolved person's folders): files, passages, passage size."""
         sql = f"SELECT COALESCE(SUM(n),0),COALESCE(SUM(passages),0),COALESCE(SUM(psize),0) FROM fts_stats m WHERE 1=1"
