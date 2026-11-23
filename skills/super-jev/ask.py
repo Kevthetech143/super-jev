@@ -2560,12 +2560,7 @@ def engine_visible(principal: str):
         target = _engine_target()
         db = _engine_module(target[0]).load_config(target[1])["db"]
         with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)) as c:
-            try:  # the principals list is read inside SQLite: no pointer body is parsed here
-                return {n for (n,) in c.execute(
-                    "SELECT name FROM pointers WHERE json_type(body, '$.principals') = 'array' AND EXISTS "
-                    "(SELECT 1 FROM json_each(body, '$.principals') WHERE value = ?)", (principal,))}
-            except sqlite3.OperationalError:  # no JSON functions in this SQLite build
-                return {n for n, b in c.execute("SELECT name, body FROM pointers") if principal in json.loads(b).get("principals", [])}
+            return set(sys.modules["service"].principal_pointer_names(c, principal))
     except Exception:  # noqa: BLE001
         return None
 
@@ -2575,13 +2570,7 @@ def engine_generations():
         target = _engine_target()
         db = _engine_module(target[0]).load_config(target[1])["db"]
         with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)) as c:
-            try:  # a text generation is read inside SQLite; a body that holds anything else is parsed as before
-                got = {n: g for n, g in c.execute("SELECT name, json_extract(body, '$.generation') FROM pointers")}
-                if all(g is None or isinstance(g, str) for g in got.values()):
-                    return got
-            except sqlite3.OperationalError:  # no JSON functions in this SQLite build
-                pass
-            return {n: json.loads(b).get("generation") for n, b in c.execute("SELECT name, body FROM pointers")}
+            return sys.modules["service"].pointer_generations(c)
     except Exception:  # noqa: BLE001
         return None
 

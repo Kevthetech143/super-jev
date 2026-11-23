@@ -109,7 +109,15 @@ class StatSha:
             self.rows[path] = (k, sha)
             self.pending[path] = (k, sha)
 
+    def close(self):
+        """Close the read connection (reopened by the next lookup). flush() calls it: the ask is over by then."""
+        with self.lock:
+            db, self.db, self.loaded = self.db, None, False
+        if db is not None:
+            db.close()
+
     def flush(self):
+        self.close()
         with self.lock:
             batch, self.pending = self.pending, {}
         if not batch:

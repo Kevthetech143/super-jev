@@ -214,6 +214,40 @@ def _originals(entry) -> list[str]:
     return [o['path'] for o in (entry or {}).get('originals', []) if isinstance(o, dict) and o.get('path')]
 
 
+_SQL_TYPES = {'true': True, 'false': False, 'null': None}
+
+
+def _top_level(c, key: str) -> dict:
+    """{name: json.loads(body).get(key)} for the pointers whose body has `key`; a pointer with no such key is left out.
+    SQLite walks the body's top-level entries in document order (a duplicate key yields two rows), so the LAST one wins,
+    exactly as json.loads does; only that one value is parsed here, not the whole body. No JSON functions in this
+    SQLite build: the plain path."""
+    out = {}
+    try:
+        rows = c.execute("SELECT p.name, e.type, e.value FROM pointers p, json_each(p.body) e WHERE e.key = ? "
+                         "ORDER BY p.name, e.id", (key,)).fetchall()
+    except sqlite3.OperationalError:
+        for name, body in c.execute('SELECT name, body FROM pointers').fetchall():
+            parsed = json.loads(body)
+            if key in parsed:
+                out[name] = parsed[key]
+        return out
+    for name, kind, value in rows:
+        out[name] = json.loads(value) if kind in ('array', 'object') else _SQL_TYPES.get(kind, value)
+    return out
+
+
+def principal_pointer_names(c, principal: str) -> list[str]:
+    """Names of the pointers whose body lists `principal`, name-sorted: json.loads(body).get('principals', [])."""
+    return sorted(n for n, listed in _top_level(c, 'principals').items() if principal in listed)
+
+
+def pointer_generations(c) -> dict:
+    """{name: json.loads(body).get('generation')} for every pointer (None when the body has none)."""
+    got = _top_level(c, 'generation')
+    return {n: got.get(n) for (n,) in c.execute('SELECT name FROM pointers')}
+
+
 class Service:
     """Store verified dataset pointers, review tickets, and approved results."""
 
@@ -1204,16 +1238,7 @@ class Service:
     def _visible_pointers(self, principal: str) -> list[str]:
         """Names of registered pointers this principal is included in, name-sorted."""
         with self.connect() as c:
-            try:  # the principals list is read inside SQLite: no pointer body is parsed here
-                rows = c.execute(
-                    "SELECT name FROM pointers WHERE json_type(body, '$.principals') = 'array' AND EXISTS "
-                    "(SELECT 1 FROM json_each(body, '$.principals') WHERE value = ?) ORDER BY name",
-                    (principal,)).fetchall()
-                return [name for (name,) in rows]
-            except sqlite3.OperationalError:  # no JSON functions in this SQLite build
-                rows = c.execute('SELECT name, body FROM pointers ORDER BY name').fetchall()
-        return [name for name, body in rows
-                if principal in json.loads(body).get('principals', [])]
+            return principal_pointer_names(c, principal)
 
     def cached(
         self, principal: str, question: str, pointer: str | None = None, context: str = '',
