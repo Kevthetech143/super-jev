@@ -219,16 +219,16 @@ _SQL_TYPES = {'true': True, 'false': False, 'null': None}
 
 def _top_level(c, key: str) -> dict:
     """{name: json.loads(body).get(key)} for the pointers whose body has `key`; a pointer with no such key is left out.
-    SQLite reads only a body that is STRICT JSON (json_valid(body, 1): SQLite's json_each also takes JSON5, which
+    SQLite reads only a body that is STRICT JSON with no NUL byte (json_valid(body, 1) stops at a NUL, json.loads does not: SQLite's json_each also takes JSON5, which
     json.loads rejects, so a lax body must never be read there). It walks the top-level entries in document order (a
     duplicate key yields two rows), so the LAST one wins, as in json.loads, and only that value is parsed here. Every other
     body, and every body when this SQLite has no JSON functions, goes through json.loads (which raises on a bad one)."""
     out, plain = {}, None
     try:
         rows = c.execute("SELECT p.name, e.type, e.value FROM pointers p, "
-                         "json_each(CASE WHEN json_valid(p.body, 1) THEN p.body ELSE '{}' END) e WHERE e.key = ? "
+                         "json_each(CASE WHEN json_valid(p.body, 1) AND instr(CAST(p.body AS BLOB), x'00') = 0 THEN p.body ELSE '{}' END) e WHERE e.key = ? "
                          "ORDER BY p.name, e.id", (key,)).fetchall()
-        plain = c.execute('SELECT name, body FROM pointers WHERE NOT json_valid(body, 1)').fetchall()
+        plain = c.execute("SELECT name, body FROM pointers WHERE NOT (json_valid(body, 1) AND instr(CAST(body AS BLOB), x'00') = 0)").fetchall()
     except sqlite3.OperationalError:
         rows, plain = [], c.execute('SELECT name, body FROM pointers').fetchall()
     for name, kind, value in rows:

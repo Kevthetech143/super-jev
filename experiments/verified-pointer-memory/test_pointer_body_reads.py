@@ -54,6 +54,7 @@ LAX = {  # json.loads rejects each of these; SQLite's json_each would take them 
     'lax-single': "{'principals':['alice']}",
     'lax-trailing-comma': '{"principals":["alice"],}',
     'lax-comment': '{"principals":["alice"]} // c',
+    'nul-trailing': '{"principals":["alice"]}\x00junk',
 }
 
 
