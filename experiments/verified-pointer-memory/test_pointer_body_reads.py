@@ -28,6 +28,7 @@ BODIES = {
     'dup-generation': '{"principals":["alice"],"generation":"old","generation":"new"}',
     'nested-key': '{"principals":["carol"],"x":{"principals":["alice"]},"generation":"g5"}',
     'string-principals': '{"principals":"alice-and-more","generation":"g6"}',
+    'dup-then-null': '{"principals":["alice"],"principals":null,"generation":"g9"}',
     'no-principals': '{"generation":"g7"}',
     'gen-object': '{"principals":["alice"],"generation":{"a":1}}',
     'gen-array': '{"principals":["alice"],"generation":[1,2]}',
@@ -40,11 +41,52 @@ BODIES = {
 
 
 def reference_names(rows, principal):
-    return sorted(n for n, b in rows if principal in json.loads(b).get('principals', []))
+    return sorted(n for n, b in rows
+                  if isinstance(listed := json.loads(b).get('principals', []), list) and principal in listed)
 
 
 def reference_generations(rows):
     return {n: json.loads(b).get('generation') for n, b in rows}
+
+
+LAX = {  # json.loads rejects each of these; SQLite's json_each would take them (JSON5): never visible
+    'lax-unquoted': '{principals:["alice"]}',
+    'lax-single': "{'principals':['alice']}",
+    'lax-trailing-comma': '{"principals":["alice"],}',
+    'lax-comment': '{"principals":["alice"]} // c',
+}
+
+
+class LaxBodies(unittest.TestCase):
+    def setUp(self):
+        self.c = sqlite3.connect(':memory:')
+        self.c.execute('CREATE TABLE pointers(name TEXT PRIMARY KEY, body TEXT)')
+        self.c.execute('INSERT INTO pointers VALUES(?,?)', ('valid', '{"principals":["alice"]}'))
+
+    def check(self, conn, name, body):
+        self.c.execute('INSERT OR REPLACE INTO pointers VALUES(?,?)', (name, body))
+        with self.assertRaises(ValueError):  # what the old json.loads read did: raise, so the caller fails closed
+            json.loads(body)
+        with self.assertRaises(ValueError):
+            principal_pointer_names(conn, 'alice')
+        self.c.execute('DELETE FROM pointers WHERE name=?', (name,))
+
+    def test_lax_bodies_are_never_visible(self):
+        for name, body in LAX.items():
+            self.check(self.c, name, body)
+
+    def test_lax_bodies_without_json_functions(self):
+        for name, body in LAX.items():
+            self.check(NoJson(self.c), name, body)
+
+    def test_valid_body_is_visible(self):
+        self.assertEqual(principal_pointer_names(self.c, 'alice'), ['valid'])
+        self.assertEqual(principal_pointer_names(NoJson(self.c), 'alice'), ['valid'])
+
+    def test_duplicate_key_then_null_lists_nobody_without_a_type_error(self):
+        self.c.execute('INSERT INTO pointers VALUES(?,?)', ('dn', '{"principals":["alice"],"principals":null}'))
+        self.assertEqual(principal_pointer_names(self.c, 'alice'), ['valid'])
+        self.assertEqual(principal_pointer_names(NoJson(self.c), 'alice'), ['valid'])
 
 
 class PointerBodyReads(unittest.TestCase):
